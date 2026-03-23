@@ -578,10 +578,24 @@ export default function Page() {
 
   const downloadCSV = (data: any[], filename: string) => {
     if (!data.length) return;
-    const headers = Object.keys(data[0]).join(",");
+    
+    // Aggregate ALL possible keys across all rows to prevent column shifting
+    const headerSet = new Set<string>();
+    data.forEach(row => Object.keys(row).forEach(key => headerSet.add(key)));
+    const headersArray = Array.from(headerSet);
+    
+    const headers = headersArray.join(",");
     const rows = data.map(row => 
-      Object.values(row).map(value => `"${String(value ?? "").replace(/"/g, '""')}"`).join(",")
+      headersArray.map(key => {
+        let value = row[key] ?? "";
+        // Safely parse Firestore Timestamps into readable dates
+        if (typeof value === "object" && value !== null && "seconds" in value) {
+            value = new Date(value.seconds * 1000).toLocaleString();
+        }
+        return `"${String(value).replace(/"/g, '""')}"`;
+      }).join(",")
     ).join("\n");
+    
     const csvContent = `${headers}\n${rows}`;
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement("a");
