@@ -1,0 +1,13 @@
+{
+  "expo": {
+    "name": "SkoolPath Admin",
+    "slug": "skoolpath-admin",
+    "scheme": "skoolpath-admin",
+    "entryPoint": "./index.js",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "platforms": [
+      "web"
+    ]
+  }
+}

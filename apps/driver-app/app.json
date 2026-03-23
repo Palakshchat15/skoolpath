@@ -1,0 +1,43 @@
+{
+  "expo": {
+    "name": "SkoolPath Driver",
+    "slug": "skoolpath-driver",
+    "scheme": "skoolpath-driver",
+    "entryPoint": "./index.js",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "platforms": [
+      "android",
+      "ios",
+      "web"
+    ],
+    "plugins": [
+      "expo-location"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "The driver app needs your location to share the bus position with parents.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "The driver app needs background location so parents can track the bus during trips.",
+        "UIBackgroundModes": [
+          "location"
+        ]
+      }
+    },
+    "android": {
+      "permissions": [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_LOCATION"
+      ],
+      "package": "com.skoolpath.driver"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "replace-this-with-your-eas-project-id"
+      }
+    }
+  }
+}

@@ -1,0 +1,89 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+  
+    // Helper Functions checking Authentication & Roles
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function getUserData() {
+      // Assumes we map Auth UID to the document ID in the users collection.
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isSuperAdmin() {
+      return isAuthenticated() && getUserData().role == 'super-admin';
+    }
+
+    function isSchoolAdmin(schoolId) {
+      let user = getUserData();
+      return isAuthenticated() && user.role == 'school-admin' && user.schoolId == schoolId;
+    }
+
+    function isDriver(schoolId, busId) {
+      let user = getUserData();
+      return isAuthenticated() && user.role == 'driver' && user.schoolId == schoolId && user.busId == busId;
+    }
+
+    function isParent(schoolId, busId) {
+      let user = getUserData();
+      return isAuthenticated() && user.role == 'parent' && user.schoolId == schoolId && user.busId == busId;
+    }
+
+    // Rules for Collections
+
+    match /users/{userId} {
+      allow read, write: if isSuperAdmin() 
+                         || (isAuthenticated() && userId == request.auth.uid)
+                         || (isAuthenticated() && getUserData().role == 'school-admin' && resource.data.schoolId == getUserData().schoolId);
+      
+      allow create: if isSuperAdmin() 
+                    || (isAuthenticated() && getUserData().role == 'school-admin' && request.resource.data.schoolId == getUserData().schoolId);
+    }
+
+    match /schools/{schoolId} {
+      allow read: if isAuthenticated();
+      allow write: if isSuperAdmin();
+    }
+
+    match /schools/{schoolId}/buses/{busId} {
+      allow read: if isSuperAdmin() 
+                  || isSchoolAdmin(schoolId) 
+                  || isParent(schoolId, busId) 
+                  || isDriver(schoolId, busId);
+                  
+      allow write: if isSuperAdmin() 
+                   || isSchoolAdmin(schoolId) 
+                   || isDriver(schoolId, busId); 
+    }
+
+    // Live buses collection root mapping
+    match /buses/{busId} {
+      allow read: if isAuthenticated();
+      allow write: if isSuperAdmin() || (isAuthenticated() && getUserData().role == 'school-admin' && resource.data.schoolId == getUserData().schoolId);
+    }
+
+    match /trips/{tripId} {
+      allow read: if isAuthenticated();
+      allow write: if isSuperAdmin()
+                   || (isAuthenticated() && getUserData().role == 'school-admin' && request.resource.data.schoolId == getUserData().schoolId)
+                   || (isAuthenticated() && getUserData().role == 'driver' && request.resource.data.driverId == request.auth.uid);
+    }
+
+    match /sos_alerts/{alertId} {
+      allow create: if isAuthenticated() && getUserData().role == 'parent';
+      // School Admins can read/update SOS for their school
+      allow read, update: if isSuperAdmin() 
+                          || (isAuthenticated() && getUserData().role == 'school-admin' && resource.data.schoolId == getUserData().schoolId);
+      allow delete: if isSuperAdmin();
+    }
+
+    match /notifications/{notifId} {
+      allow create: if isAuthenticated() && (getUserData().role == 'driver' || getUserData().role == 'super-admin' || getUserData().role == 'school-admin');
+      // Parents can read notifications targeted to their email/userId or bus
+      allow read: if isAuthenticated() && (resource.data.targetEmail == getUserData().email || resource.data.targetEmail == getUserData().id || resource.data.targetEmail == 'bus_' + getUserData().busId);
+      allow update, delete: if isSuperAdmin();
+    }
+  }
+}
