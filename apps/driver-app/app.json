@@ -12,7 +12,8 @@
       "web"
     ],
     "plugins": [
-      "expo-location"
+      "expo-location",
+      "./withAndroidXCoreDowngrade.js"
     ],
     "ios": {
       "supportsTablet": true,
@@ -30,13 +31,15 @@
         "ACCESS_FINE_LOCATION",
         "ACCESS_BACKGROUND_LOCATION",
         "FOREGROUND_SERVICE",
-        "FOREGROUND_SERVICE_LOCATION"
+        "FOREGROUND_SERVICE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION"
       ],
       "package": "com.skoolpath.driver"
     },
     "extra": {
       "eas": {
-        "projectId": "replace-this-with-your-eas-project-id"
+        "projectId": "b74df9cb-5289-4632-9814-1ffc682ad5e2"
       }
     }
   }
