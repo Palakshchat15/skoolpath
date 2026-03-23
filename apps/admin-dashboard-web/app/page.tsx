@@ -597,25 +597,25 @@ export default function Page() {
 
   const filteredSchools = schools.filter(
     (s) =>
-      s.name.toLowerCase().includes(term) ||
-      s.id.toLowerCase().includes(term) ||
-      s.city.toLowerCase().includes(term)
+      (s.name || "").toLowerCase().includes(term) ||
+      (s.id || "").toLowerCase().includes(term) ||
+      (s.city || "").toLowerCase().includes(term)
   );
 
   const filteredBuses = buses.filter(
     (b) =>
-      b.label.toLowerCase().includes(term) ||
-      b.id.toLowerCase().includes(term) ||
-      b.routeName.toLowerCase().includes(term) ||
-      b.plateNumber.toLowerCase().includes(term)
+      (b.label || "").toLowerCase().includes(term) ||
+      (b.id || "").toLowerCase().includes(term) ||
+      (b.routeName || "").toLowerCase().includes(term) ||
+      (b.plateNumber || "").toLowerCase().includes(term)
   );
 
   const filteredUsers = users.filter(
     (u) =>
-      u.fullName.toLowerCase().includes(term) ||
-      u.email.toLowerCase().includes(term) ||
-      u.role.toLowerCase().includes(term) ||
-      u.id.toLowerCase().includes(term)
+      (u.fullName || "").toLowerCase().includes(term) ||
+      (u.email || "").toLowerCase().includes(term) ||
+      (u.role || "").toLowerCase().includes(term) ||
+      (u.id || "").toLowerCase().includes(term)
   );
 
   const filteredTrips = trips.filter(
