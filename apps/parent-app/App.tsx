@@ -495,8 +495,8 @@ export default function App() {
           <FloatingInput label="Student Name" value={studentName} onChangeText={setStudentName} />
           <FloatingInput label="Pickup Stop" value={stopName} onChangeText={setStopName} />
           <View style={styles.buttonRow}>
-            <GradientButton icon="💾" label="Save" onPress={() => void handleSave()} loading={isLoading} colors={["#16a34a", "#15803d"]} />
-            <GradientButton icon="🚪" label="Logout" onPress={() => void handleLogout()} colors={["#64748b", "#475569"]} />
+            <GradientButton style={{ flex: 1 }} icon="💾" label="Save" onPress={() => void handleSave()} loading={isLoading} colors={["#16a34a", "#15803d"]} />
+            <GradientButton style={{ flex: 1 }} icon="🚪" label="Logout" onPress={() => void handleLogout()} colors={["#64748b", "#475569"]} />
           </View>
           <StatusLine message={statusMessage} connected={statusMessage.includes("connected") || statusMessage.includes("Signed in")} />
         </View>
@@ -886,9 +886,9 @@ function FloatingInput({ label, placeholder, value, onChangeText, secureTextEntr
 }
 
 /* ─── Gradient Button with Scale + Loading ─── */
-function GradientButton({ icon, label, onPress, loading, colors, disabled }: {
+function GradientButton({ icon, label, onPress, loading, colors, disabled, style }: {
   icon: string; label: string; onPress: () => void;
-  colors: string[]; loading?: boolean; disabled?: boolean;
+  colors: string[]; loading?: boolean; disabled?: boolean; style?: any;
 }) {
   const scale = useRef(new Animated.Value(1)).current;
 
@@ -901,7 +901,7 @@ function GradientButton({ icon, label, onPress, loading, colors, disabled }: {
   };
 
   return (
-    <Animated.View style={{ transform: [{ scale }], flex: 1 }}>
+    <Animated.View style={[style, { transform: [{ scale }] }]}>
       <TouchableOpacity
         style={[styles.gradientButton, { backgroundColor: colors[0] }, (disabled || loading) && styles.styledButtonDisabled]}
         onPress={onPress}

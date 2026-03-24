@@ -34,7 +34,7 @@
       "package": "com.skoolpath.driver",
       "config": {
         "googleMaps": {
-          "apiKey": ""
+          "apiKey": "AIzaSyAI2LDIMaMV9smRA4fak1_2eWSQv9bXDHI"
         }
       }
     },

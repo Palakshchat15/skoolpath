@@ -12,7 +12,12 @@
       "web"
     ],
     "android": {
-      "package": "com.skoolpath.parent"
+      "package": "com.skoolpath.parent",
+      "config": {
+        "googleMaps": {
+          "apiKey": "AIzaSyAI2LDIMaMV9smRA4fak1_2eWSQv9bXDHI"
+        }
+      }
     },
     "ios": {
       "supportsTablet": true
