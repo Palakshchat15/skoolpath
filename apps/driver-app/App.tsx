@@ -572,12 +572,12 @@ export default function App() {
           <FloatingInput label="Route Name" value={currentLocation.routeName}
             onChangeText={(v) => setCurrentLocation((p) => ({ ...p, routeName: v }))} />
           <View style={styles.buttonRow}>
-            <GradientButton icon="▶" label="Start Trip" onPress={() => void startTrip()} colors={["#16a34a", "#15803d"]} disabled={tripActive} loading={isTripLoading && !tripActive} />
-            <GradientButton icon="⏹" label="Stop Trip" onPress={() => void stopTrip()} colors={["#dc2626", "#b91c1c"]} disabled={!tripActive} loading={isTripLoading && tripActive} />
+            <GradientButton style={{ flex: 1 }} icon="▶" label="Start Trip" onPress={() => void startTrip()} colors={["#16a34a", "#15803d"]} disabled={tripActive} loading={isTripLoading && !tripActive} />
+            <GradientButton style={{ flex: 1 }} icon="⏹" label="Stop Trip" onPress={() => void stopTrip()} colors={["#dc2626", "#b91c1c"]} disabled={!tripActive} loading={isTripLoading && tripActive} />
           </View>
           <View style={styles.buttonRow}>
-            <GradientButton icon="⏭" label="Next Stop" onPress={() => void goToNextStop()} colors={["#2563eb", "#1d4ed8"]} />
-            <GradientButton icon="🚪" label="Logout" onPress={() => void handleLogout()} colors={["#64748b", "#475569"]} />
+            <GradientButton style={{ flex: 1 }} icon="⏭" label="Next Stop" onPress={() => void goToNextStop()} colors={["#2563eb", "#1d4ed8"]} />
+            <GradientButton style={{ flex: 1 }} icon="🚪" label="Logout" onPress={() => void handleLogout()} colors={["#64748b", "#475569"]} />
           </View>
           <StatusLine message={statusMessage} connected={isConnected} />
         </View>
@@ -856,12 +856,12 @@ function FloatingInput({ label, placeholder, value, onChangeText, secureTextEntr
   );
 }
 
-function GradientButton({ icon, label, onPress, loading, colors, disabled }: {
-  icon: string; label: string; onPress: () => void; colors: string[]; loading?: boolean; disabled?: boolean;
+function GradientButton({ icon, label, onPress, loading, colors, disabled, style }: {
+  icon: string; label: string; onPress: () => void; colors: string[]; loading?: boolean; disabled?: boolean; style?: any;
 }) {
   const scale = useRef(new Animated.Value(1)).current;
   return (
-    <Animated.View style={{ transform: [{ scale }], flex: 1 }}>
+    <Animated.View style={[style, { transform: [{ scale }] }]}>
       <TouchableOpacity
         style={[styles.gradientButton, { backgroundColor: colors[0] }, (disabled || loading) && styles.styledButtonDisabled]}
         onPress={onPress} disabled={disabled || loading} activeOpacity={1}

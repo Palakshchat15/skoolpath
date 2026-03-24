@@ -12,7 +12,12 @@
       "web"
     ],
     "plugins": [
-      "expo-location",
+      [
+        "expo-location",
+        {
+          "isAndroidBackgroundLocationEnabled": true
+        }
+      ],
       "./withAndroidXCoreDowngrade.js"
     ],
     "ios": {
@@ -26,16 +31,12 @@
       }
     },
     "android": {
-      "permissions": [
-        "ACCESS_COARSE_LOCATION",
-        "ACCESS_FINE_LOCATION",
-        "ACCESS_BACKGROUND_LOCATION",
-        "FOREGROUND_SERVICE",
-        "FOREGROUND_SERVICE_LOCATION",
-        "android.permission.ACCESS_COARSE_LOCATION",
-        "android.permission.ACCESS_FINE_LOCATION"
-      ],
-      "package": "com.skoolpath.driver"
+      "package": "com.skoolpath.driver",
+      "config": {
+        "googleMaps": {
+          "apiKey": ""
+        }
+      }
     },
     "extra": {
       "eas": {
