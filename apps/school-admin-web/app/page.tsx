@@ -47,41 +47,51 @@ export default function Page() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   useEffect(() => {
-    if (!auth) return;
+    if (!auth) {
+      setLoading(false);
+      window.location.href = "/login";
+      return;
+    }
 
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      if (firebaseUser) {
-        setUser(firebaseUser);
-        // Fetch user record
-        if (db) {
-          const userData = await getDocs(query(getUsersCollection(db), where("email", "==", firebaseUser.email)));
-          if (!userData.empty) {
-            const userRec = userData.docs[0].data();
-            setUserRecord(userRec);
-            if (userRec.role === "school-admin" && userRec.schoolId) {
-              // Load school data
-              const schoolData = await getDocs(query(getSchoolsCollection(db), where("id", "==", userRec.schoolId)));
-              if (!schoolData.empty) {
-                setSchool(schoolData.docs[0].data());
+      try {
+        if (firebaseUser) {
+          setUser(firebaseUser);
+          if (db) {
+            const userData = await getDocs(query(getUsersCollection(db), where("email", "==", firebaseUser.email)));
+            if (!userData.empty) {
+              const userRec = userData.docs[0].data();
+              setUserRecord(userRec);
+              if (userRec.role === "school-admin" && userRec.schoolId) {
+                const schoolData = await getDocs(query(getSchoolsCollection(db), where("id", "==", userRec.schoolId)));
+                if (!schoolData.empty) {
+                  setSchool(schoolData.docs[0].data());
+                }
+              } else {
+                await signOutUser();
+                setUser(null);
+                setUserRecord(null);
               }
             } else {
-              // Not a school admin, sign out
               await signOutUser();
               setUser(null);
-              setUserRecord(null);
             }
-          } else {
-            await signOutUser();
-            setUser(null);
           }
+        } else {
+          setUser(null);
+          setUserRecord(null);
+          setSchool(null);
+          window.location.href = "/login";
         }
-      } else {
+      } catch (err) {
+        console.error("Firebase Auth or Firestore error:", err);
+        // Ensure user is signed out if there's a permissions error
+        await signOutUser().catch(() => {});
         setUser(null);
-        setUserRecord(null);
-        setSchool(null);
         window.location.href = "/login";
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     });
 
     return () => unsubscribe();
