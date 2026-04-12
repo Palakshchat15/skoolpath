@@ -9,6 +9,10 @@
     },
     "preview": {
       "distribution": "internal",
+      "node": "20.x",
+      "env": {
+        "npm_config_legacy_peer_deps": "true"
+      },
       "android": {
         "buildType": "apk"
       }
