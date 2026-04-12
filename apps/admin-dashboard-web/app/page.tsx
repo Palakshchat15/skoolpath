@@ -28,8 +28,25 @@ import {
   type SOSAlert
 } from "@skoolpath/shared";
 
+import DashboardOverviewTab from "./components/DashboardOverviewTab";
+import SchoolsTab from "./components/SchoolsTab";
+import BusesTab from "./components/BusesTab";
+import UsersTab from "./components/UsersTab";
+import TripsTab from "./components/TripsTab";
+import DriversTab from "./components/DriversTab";
+import StudentsTab from "./components/StudentsTab";
+import RoutesTab from "./components/RoutesTab";
+import SubscriptionPlansTab from "./components/SubscriptionPlansTab";
+import SubscriptionsTab from "./components/SubscriptionsTab";
+import NotificationsTab from "./components/NotificationsTab";
+import AlertSettingsTab from "./components/AlertSettingsTab";
+import ReportsTab from "./components/ReportsTab";
+
+import { LayoutDashboard, School, Users, Bus, Navigation, UserCheck, GraduationCap, Route, CreditCard, Receipt, BellRing, Settings, BarChart3, Sun, Moon, LogOut, Menu, X } from "lucide-react";
+import BusRouteAnimation from "./components/BusRouteAnimation";
+
 type AdminScreen = "login" | "register" | "dashboard";
-type AdminTab = "schools" | "buses" | "users" | "trips";
+type AdminTab = "dashboard" | "schools" | "buses" | "users" | "drivers" | "students" | "routes" | "trips" | "subscription-plans" | "subscriptions" | "notifications" | "alert-settings" | "reports";
 
 type AdminSession = {
   screen: AdminScreen;
@@ -57,6 +74,7 @@ type ConfirmState = {
   title: string;
   message: string;
   onConfirm: () => void;
+  confirmLabel?: string;
 };
 
 const sessionKey = "admin-web-session";
@@ -108,9 +126,11 @@ export default function Page() {
   const [users, setUsers] = useState<UserRecord[]>([]);
   const [trips, setTrips] = useState<TripRecord[]>([]);
   const [schoolForm, setSchoolForm] = useState<SchoolRecord>(emptySchool);
+  const [schoolPassword, setSchoolPassword] = useState("");
   const [busForm, setBusForm] = useState<BusRecord>(emptyBus);
-  const [routeStopsInput, setRouteStopsInput] = useState("");
+  const [routeStops, setRouteStops] = useState<Partial<RouteStop>[]>([]);
   const [userForm, setUserForm] = useState<UserRecord>(emptyUser);
+  const [userPassword, setUserPassword] = useState("");
 
   /* New UI state */
   const [activeTab, setActiveTab] = useState<AdminTab>("schools");
@@ -125,16 +145,18 @@ export default function Page() {
     message: "",
     onConfirm: () => {}
   });
+  const [isLoading, setIsLoading] = useState(true);
   const [darkMode, setDarkMode] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   useEffect(() => {
     loadSession();
     loadCachedData();
-    const savedTheme = localStorage.getItem("admin-theme");
-    if (savedTheme === "dark") {
-      setDarkMode(true);
-      document.documentElement.setAttribute("data-theme", "dark");
-    }
+    const savedTheme = localStorage.getItem("admin-theme") ?? "dark";
+    setDarkMode(savedTheme === "dark");
+    document.documentElement.setAttribute("data-theme", savedTheme);
+    // Small delay to prevent flash
+    setTimeout(() => setIsLoading(false), 400);
   }, []);
 
   useEffect(() => {
@@ -187,8 +209,8 @@ export default function Page() {
     addToast("SOS marked as resolved.", "✅");
   };
 
-  const showConfirm = (title: string, message: string, onConfirm: () => void) => {
-    setConfirmState({ open: true, title, message, onConfirm });
+  const showConfirm = (title: string, message: string, onConfirm: () => void, confirmLabel = "Delete") => {
+    setConfirmState({ open: true, title, message, onConfirm, confirmLabel });
   };
 
   const closeConfirm = () => {
@@ -342,6 +364,7 @@ export default function Page() {
     const nextSchools = [nextRecord, ...schools.filter((item) => item.id !== nextRecord.id)];
     setSchools(nextSchools);
     setSchoolForm(emptySchool);
+    setSchoolPassword("");
     persistData({ ...getFullData(), schools: nextSchools });
 
     if (!db) {
@@ -350,10 +373,47 @@ export default function Page() {
       return;
     }
 
+    const adminUserId = nextRecord.contactEmail.trim().toLowerCase();
+    const adminUser: UserRecord = {
+      id: adminUserId,
+      schoolId: nextRecord.id,
+      fullName: nextRecord.transportManager.trim() || `${nextRecord.name} Admin`,
+      email: adminUserId,
+      role: "school-admin",
+      phone: "",
+      busId: "",
+      studentName: "",
+      stopName: ""
+    };
+
+    if (schoolPassword) {
+      try {
+        await signUpUser(adminUser.email, schoolPassword);
+        addToast("School admin login created.", "🔐");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to create school admin auth account.";
+        if (message.includes("already registered") || message.includes("email-already-in-use")) {
+          addToast("School admin auth account already exists.", "ℹ️");
+        } else {
+          setStatus(message);
+          addToast(message, "❌");
+        }
+      }
+    }
+
     await setDoc(doc(db, "schools", nextRecord.id), {
       ...nextRecord,
       updatedAt: serverTimestamp()
     });
+
+    const nextUsers = [adminUser, ...users.filter((item) => item.id !== adminUser.id)];
+    setUsers(nextUsers);
+    persistData({ ...getFullData(), users: nextUsers });
+    await setDoc(doc(db, "users", adminUser.id), {
+      ...adminUser,
+      updatedAt: serverTimestamp()
+    });
+
     setStatus("School saved to Firestore.");
     addToast(`School "${nextRecord.name}" saved.`, "🏫");
   };
@@ -363,17 +423,17 @@ export default function Page() {
     if (adminRole === "school-admin") {
       nextRecord.schoolId = adminSchoolId;
     }
-    setStatus("Resolving route stops and saving bus...");
-    addToast("Resolving route stops...", "⏳");
-    const routeStops = await geocodeRouteStops(
-      routeStopsInput,
+    setStatus("Resolving route coordinates and saving bus...");
+    addToast("Finalizing route mapping...", "⏳");
+    const geocodedStops = await geocodeRouteStops(
+      routeStops,
       nextRecord.id,
       schools.find((school) => school.id === nextRecord.schoolId) ?? null
     );
     const nextBuses = [nextRecord, ...buses.filter((item) => item.id !== nextRecord.id)];
     setBuses(nextBuses);
     setBusForm(emptyBus);
-    setRouteStopsInput("");
+    setRouteStops([]);
     persistData({ ...getFullData(), buses: nextBuses });
 
     if (!db) {
@@ -395,43 +455,63 @@ export default function Page() {
         busLabel: nextRecord.label,
         routeName: nextRecord.routeName,
         driverId: nextRecord.driverId,
-        routeStops,
-        currentStopId: routeStops[0]?.id ?? "",
-        currentStopName: routeStops[0]?.name ?? "",
-        nextStopId: routeStops[1]?.id ?? routeStops[0]?.id ?? "",
-        nextStopName: routeStops[1]?.name ?? routeStops[0]?.name ?? "",
-        latitude: routeStops[0]?.latitude ?? 28.6139,
-        longitude: routeStops[0]?.longitude ?? 77.209,
+        routeStops: geocodedStops,
+        currentStopId: geocodedStops[0]?.id ?? "",
+        currentStopName: geocodedStops[0]?.name ?? "",
+        nextStopId: geocodedStops[1]?.id ?? geocodedStops[0]?.id ?? "",
+        nextStopName: geocodedStops[1]?.name ?? geocodedStops[0]?.name ?? "",
+        latitude: geocodedStops[0]?.latitude ?? 28.6139,
+        longitude: geocodedStops[0]?.longitude ?? 77.209,
         speed: 0,
         heading: 0,
         accuracy: null,
         students: [],
         tripActive: false,
         driverName: "",
-        lastEvent: routeStops.length ? `Route loaded with ${routeStops.length} stops` : "Bus created",
+        lastEvent: geocodedStops.length ? `Route loaded with ${geocodedStops.length} stops` : "Bus created",
         updatedAt: serverTimestamp()
       },
       { merge: true }
     );
 
     setStatus("Bus and route saved to Firestore.");
-    addToast(`Bus "${nextRecord.label}" saved with ${routeStops.length} stops.`, "🚌");
+    addToast(`Bus "${nextRecord.label}" saved with ${geocodedStops.length} stops.`, "🚌");
   };
 
   const saveUser = async () => {
     const nextRecord = normalizeUser(userForm);
+    if (!nextRecord.id) {
+      nextRecord.id = nextRecord.email.trim().toLowerCase() || crypto.randomUUID();
+    }
     if (adminRole === "school-admin") {
       nextRecord.schoolId = adminSchoolId;
     }
     const nextUsers = [nextRecord, ...users.filter((item) => item.id !== nextRecord.id)];
     setUsers(nextUsers);
     setUserForm(emptyUser);
+    setUserPassword("");
     persistData({ ...getFullData(), users: nextUsers });
 
     if (!db) {
       setStatus("User saved locally only.");
       addToast("User saved locally.", "💾");
       return;
+    }
+
+    if (userPassword) {
+      try {
+        await signUpUser(nextRecord.email, userPassword);
+        addToast("Authentication account created.", "🔐");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Unable to create auth account.";
+        if (message.includes("already registered")) {
+          addToast("Authentication account already exists for that email.", "ℹ️");
+        } else {
+          setStatus(message);
+          addToast(message, "❌");
+          return;
+        }
+      }
     }
 
     await setDoc(doc(db, "users", nextRecord.id), {
@@ -449,6 +529,7 @@ export default function Page() {
 
   const editSchool = (record: SchoolRecord) => {
     setSchoolForm(record);
+    setSchoolPassword("");
     setActiveTab("schools");
   };
 
@@ -456,16 +537,17 @@ export default function Page() {
     setBusForm(record);
     setActiveTab("buses");
     if (!db) {
-      setRouteStopsInput("");
+      setRouteStops([]);
       return;
     }
 
     const liveBus = await getBusLiveLocation(db, record.schoolId, record.id);
-    setRouteStopsInput(formatRouteStops(liveBus?.routeStops ?? []));
+    setRouteStops(liveBus?.routeStops ?? []);
   };
 
   const editUser = (record: UserRecord) => {
     setUserForm(record);
+    setUserPassword("");
     setActiveTab("users");
   };
 
@@ -531,7 +613,6 @@ export default function Page() {
         getDocs(query(getUsersCollection(db), where("busId", "==", bus.id))),
         getDocs(query(getTripsCollection(db), where("busId", "==", bus.id)))
       ]);
-
       await Promise.all(
         linkedUsers.docs.map((userDoc) =>
           setDoc(
@@ -642,43 +723,74 @@ export default function Page() {
 
   const activeTripsCount = trips.filter((t) => t.status === "active").length;
 
-  /* ─── Auth Screen ─── */
+  /* ─── Global Loading Screen ─── */
+  if (isLoading) {
+    return (
+      <div className="loadingScreen">
+        <div className="loadingSpinner" />
+        <span className="loadingLabel">Loading SkoolPath...</span>
+      </div>
+    );
+  }
+
+  /* ─── Auth Screen (Split Glassmorphism UI) ─── */
   if (screen !== "dashboard") {
     return (
-      <main className="shell">
-        <section className="hero authHero">
-          <div className="heroBadge">SkoolPath Admin Web</div>
-          <p className="eyebrow">Transport control, built for the browser</p>
-          <h1>{screen === "login" ? "Operate the full school fleet from one polished web console." : "Create the admin layer before managing the fleet."}</h1>
-          <p>
-            Manage schools, buses, routes, driver assignments, parent mappings, and trip visibility from one browser-first workspace.
-          </p>
-          <div className="authHighlights">
-            <HighlightCard title="Live Assignments" copy="Map drivers, buses, stops, and students without touching app code." />
-            <HighlightCard title="Route Control" copy="Publish route timelines that sync directly into the parent and driver experiences." />
-            <HighlightCard title="Fleet Visibility" copy="Track live buses and trip history from a website built for operations teams." />
+      <main className="splitAuthLayout">
+      <section className="splitAuthMedia">
+          <div className="glowingOrb1"></div>
+          <div className="glowingOrb2"></div>
+          
+
+          
+          {/* Floating Logo */}
+          <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none', zIndex: 3 }}>
+            <img className="loginLogoAnim" src="/logo.png" alt="SkoolPath Logo" style={{ width: '80%', height: '80%', objectFit: 'contain', opacity: 1 }} />
+          </div>
+
+          {/* Logo background decoration */}
+          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", opacity: 0.15, pointerEvents: "none", zIndex: 1 }}>
+            <img src="/logo.png" alt="Decoration" style={{ width: "110%", height: "110%", objectFit: "contain", filter: "blur(60px)" }} />
+          </div>
+
+          <div className="loginBusTrack">
+            <div className="animatedBus">🚌</div>
           </div>
         </section>
 
-        <section className="authCard">
-          <div className="authTop">
-            <div>
-              <p className="formEyebrow">{screen === "login" ? "Welcome back" : "Start setup"}</p>
-              <h2>{screen === "login" ? "Login to Admin" : "Register Admin Account"}</h2>
+        <section className="splitAuthForm">
+          <div className="authCardInner">
+            <div style={{ marginBottom: 40, textAlign: "left" }}>
+              <div className="sidebarBrandIcon" style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", minWidth: 72, height: 48, marginBottom: 16, padding: "0 12px" }}>
+                <img src="/logo.png" alt="logo" style={{ height: 32, objectFit: 'contain' }} />
+              </div>
+              <h2 style={{ color: "var(--text-heading)", margin: "0 0 8px" }}>
+                {screen === "login" ? "Login" : "Register Admin"}
+              </h2>
+              <p style={{ color: "var(--text-secondary)", margin: 0 }}>
+                {screen === "login" ? "Sign in to access your dashboard." : "Create an administrator account."}
+              </p>
             </div>
-            <div className="authOrb" />
+            
+            <div className="fieldGroup" style={{ marginBottom: 20 }}>
+              <label className="fieldLabel">Email Address</label>
+              <input className="fieldInput" type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="admin@skoolpath.com" />
+            </div>
+            <div className="fieldGroup" style={{ marginBottom: 32 }}>
+              <label className="fieldLabel">Password</label>
+              <input className="fieldInput" type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="••••••••" />
+            </div>
+            
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              <button className="btnPrimary" style={{ width: "100%", height: 48, fontSize: 16 }} onClick={() => void (screen === "login" ? handleLogin() : handleRegister())}>
+                {screen === "login" ? "Login" : "Register"}
+              </button>
+              <button className="btnOutline" style={{ width: "100%", height: 48, border: 'none' }} onClick={() => setScreen(screen === "login" ? "register" : "login")}>
+                {screen === "login" ? "Create an account" : "Back to login"}
+              </button>
+            </div>
+            <p className="status" style={{ textAlign: "center", marginTop: 24, fontSize: 13, color: "var(--primary-light)" }}>{status}</p>
           </div>
-          <Field label="Email" value={email} onChange={setEmail} placeholder="Enter your email" />
-          <Field label="Password" value={password} onChange={setPassword} placeholder="Enter your password" type="password" />
-          <div className="stackButtons">
-            <button className="primary" onClick={() => void (screen === "login" ? handleLogin() : handleRegister())}>
-              {screen === "login" ? "Login" : "Register"}
-            </button>
-            <button className="ghost" onClick={() => setScreen(screen === "login" ? "register" : "login")}>
-              {screen === "login" ? "Create admin account" : "Back to login"}
-            </button>
-          </div>
-          <p className="status">{status}</p>
         </section>
 
         <ToastContainer toasts={toasts} />
@@ -688,303 +800,192 @@ export default function Page() {
 
   /* ─── Dashboard Screen ─── */
   return (
-    <div className="dashboardLayout">
+    <div className="dashboard-layout">
+      {/* Mobile Menu Button */}
+      <button
+        className="mobile-menu-btn"
+        onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+        style={{ display: 'none' }}
+      >
+        {mobileMenuOpen ? <X size={20} /> : <Menu size={20} />}
+      </button>
+
+      {/* Mobile Menu Overlay */}
+      {mobileMenuOpen && (
+        <div
+          className="sidebar-overlay open"
+          onClick={() => setMobileMenuOpen(false)}
+        />
+      )}
+
       {/* Sidebar */}
-      <aside className="sidebar">
-        <div className="sidebarBrand">
-          <div className="sidebarBrandName">SkoolPath</div>
-          <div className="sidebarBrandSub">Admin Dashboard</div>
+      <aside className={`sidebar ${mobileMenuOpen ? 'open' : ''}`}>
+        <div className="sidebar-header">
+          <h2 style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <img src="/logo.png" alt="Logo" style={{ height: 28, width: 28, borderRadius: 4, objectFit: "contain" }} />
+            SkoolPath
+          </h2>
+          <p>Admin Dashboard</p>
         </div>
-        <nav className="sidebarNav">
-          <SidebarTab icon="🏫" label="Schools" badge={schools.length} active={activeTab === "schools"} onClick={() => { setActiveTab("schools"); setSearchTerm(""); }} />
-          <SidebarTab icon="🚌" label="Buses" badge={buses.length} active={activeTab === "buses"} onClick={() => { setActiveTab("buses"); setSearchTerm(""); }} />
-          <SidebarTab icon="👥" label="Users" badge={users.length} active={activeTab === "users"} onClick={() => { setActiveTab("users"); setSearchTerm(""); }} />
-          <SidebarTab icon="📋" label="Trips" badge={activeTripsCount} active={activeTab === "trips"} onClick={() => { setActiveTab("trips"); setSearchTerm(""); }} />
+        <nav className="sidebar-nav">
+          <button className={`nav-item ${activeTab === "dashboard" ? "active" : ""}`} onClick={() => {
+            setActiveTab("dashboard");
+            setMobileMenuOpen(false);
+          }}>
+            <span><LayoutDashboard size={18} /></span>
+            <span>Dashboard</span>
+          </button>
+          
+          <div className="sidebarSectionLabel">MANAGEMENT</div>
+          <button className={`nav-item ${activeTab === "schools" ? "active" : ""}`} onClick={() => {
+            setActiveTab("schools");
+            setSearchTerm("");
+            setMobileMenuOpen(false);
+          }}>
+            <span><School size={18} /></span>
+            <span>Schools</span>
+            <span className="tabBadge">{schools.length}</span>
+          </button>
+          <button className={`nav-item ${activeTab === "users" ? "active" : ""}`} onClick={() => {
+            setActiveTab("users");
+            setSearchTerm("");
+            setMobileMenuOpen(false);
+          }}>
+            <span><Users size={18} /></span>
+            <span>Users</span>
+            <span className="tabBadge">{users.length}</span>
+          </button>
+          <button className={`nav-item ${activeTab === "buses" ? "active" : ""}`} onClick={() => {
+            setActiveTab("buses");
+            setSearchTerm("");
+            setMobileMenuOpen(false);
+          }}>
+            <span><Bus size={18} /></span>
+            <span>Buses</span>
+            <span className="tabBadge">{buses.length}</span>
+          </button>
+          <button className={`nav-item ${activeTab === "drivers" ? "active" : ""}`} onClick={() => {
+            setActiveTab("drivers");
+            setSearchTerm("");
+            setMobileMenuOpen(false);
+          }}>
+            <span><UserCheck size={18} /></span>
+            <span>Drivers</span>
+          </button>
+          <button className={`nav-item ${activeTab === "students" ? "active" : ""}`} onClick={() => {
+            setActiveTab("students");
+            setSearchTerm("");
+            setMobileMenuOpen(false);
+          }}>
+            <span><GraduationCap size={18} /></span>
+            <span>Students</span>
+          </button>
+          <button className={`nav-item ${activeTab === "routes" ? "active" : ""}`} onClick={() => {
+            setActiveTab("routes");
+            setSearchTerm("");
+            setMobileMenuOpen(false);
+          }}>
+            <span><Route size={18} /></span>
+            <span>Routes</span>
+          </button>
+          <button className={`nav-item ${activeTab === "trips" ? "active" : ""}`} onClick={() => {
+            setActiveTab("trips");
+            setSearchTerm("");
+            setMobileMenuOpen(false);
+          }}>
+            <span><Navigation size={18} /></span>
+            <span>Trips</span>
+            <span className="tabBadge">{activeTripsCount}</span>
+          </button>
+
+          <div className="sidebarSectionLabel">BILLING & SUBSCRIPTIONS</div>
+          <button className={`nav-item ${activeTab === "subscription-plans" ? "active" : ""}`} onClick={() => {
+            setActiveTab("subscription-plans");
+            setMobileMenuOpen(false);
+          }}>
+            <span><CreditCard size={18} /></span>
+            <span>Plans</span>
+          </button>
+          <button className={`nav-item ${activeTab === "subscriptions" ? "active" : ""}`} onClick={() => {
+            setActiveTab("subscriptions");
+            setMobileMenuOpen(false);
+          }}>
+            <span><Receipt size={18} /></span>
+            <span>Subscriptions</span>
+          </button>
+
+          <div className="sidebarSectionLabel">TOOLS & SETTINGS</div>
+          <button className={`nav-item ${activeTab === "notifications" ? "active" : ""}`} onClick={() => {
+            setActiveTab("notifications");
+            setMobileMenuOpen(false);
+          }}>
+            <span><BellRing size={18} /></span>
+            <span>Notifications</span>
+          </button>
+          <button className={`nav-item ${activeTab === "alert-settings" ? "active" : ""}`} onClick={() => {
+            setActiveTab("alert-settings");
+            setMobileMenuOpen(false);
+          }}>
+            <span><Settings size={18} /></span>
+            <span>Alert Settings</span>
+          </button>
+          <button className={`nav-item ${activeTab === "reports" ? "active" : ""}`} onClick={() => {
+            setActiveTab("reports");
+            setMobileMenuOpen(false);
+          }}>
+            <span><BarChart3 size={18} /></span>
+            <span>Reports</span>
+          </button>
         </nav>
-        <div className="sidebarFooter">
-          <button className="themeToggle" onClick={toggleDarkMode}>
-            <span className="sidebarTabIcon">{darkMode ? "☀️" : "🌙"}</span>
+        <div className="sidebar-footer">
+          <button className="theme-toggle-btn" onClick={toggleDarkMode}>
+            <span>{darkMode ? <Sun size={18}/> : <Moon size={18}/>}</span>
             <span>{darkMode ? "Light Mode" : "Dark Mode"}</span>
           </button>
-          <button className="themeToggle" onClick={() => void handleLogout()}>
-            <span className="sidebarTabIcon">🚪</span>
+          <button className="logout-btn" onClick={() => void handleLogout()}>
+            <span><LogOut size={18} /></span>
             <span>Logout</span>
           </button>
         </div>
       </aside>
 
       {/* Main Content */}
-      <main className="mainContent">
-        {/* Hero */}
-        <section className="hero heroWide">
-          <div>
-            <p className="eyebrow">Transport Operations</p>
-            <h1>Website admin dashboard for the whole fleet.</h1>
-            <p>Create schools, assign drivers, publish route timelines, and map parents to buses.</p>
-          </div>
-          <div className="heroStats">
-            <Stat label="Schools" value={String(schools.length)} />
-            <Stat label="Buses" value={String(buses.length)} />
-            <Stat label="Users" value={String(users.length)} />
-          </div>
-        </section>
-
-        {/* Summary Stats */}
-        <div className="statsRow">
-          <StatCard icon="🏫" label="Schools" value={schools.length} colorClass="statIconSchools" />
-          <StatCard icon="🚌" label="Buses" value={buses.length} colorClass="statIconBuses" />
-          <StatCard icon="👥" label="Users" value={users.length} colorClass="statIconUsers" />
-          <StatCard icon="📋" label="Active Trips" value={activeTripsCount} colorClass="statIconTrips" />
-        </div>
-
-        {/* Toolbar */}
-        <section className="toolbar">
-          <div className="toolbarCopy">
-            <strong>System status</strong>
-            <p>{status}</p>
-          </div>
-          <div className="row">
-            <button className="ghost" onClick={() => void loadFromFirebase()}>↻ Reload</button>
-          </div>
-        </section>
-
+      <main className="main-content">
         {/* SOS Alert Banner */}
         {activeSOS.length > 0 && (
-          <div style={{ backgroundColor: "#fee2e2", border: "2px solid #ef4444", borderRadius: 16, padding: 18, marginBottom: 20 }}>
-            <h3 style={{ color: "#b91c1c", margin: 0, fontSize: 18, marginBottom: 8 }}>🚨 ACTIVE EMERGENCY SOS</h3>
-            <p style={{ color: "#991b1b", margin: 0, marginBottom: 16 }}>
+          <div className="sosBanner animFadeIn">
+            <h3>🚨 ACTIVE EMERGENCY SOS</h3>
+            <p>
               {activeSOS.length} parent(s) have triggered an SOS alert. Please coordinate with the bus driver or authorities.
             </p>
             {activeSOS.map(alert => (
-              <div key={alert.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", backgroundColor: "#ffffff", padding: 12, borderRadius: 8, marginBottom: 8 }}>
+              <div key={alert.id} className="sosItem">
                 <div>
                   <strong>{alert.parentName}</strong> {alert.studentName ? `(Child: ${alert.studentName})` : ""}
-                  <div style={{ color: "#64748b", fontSize: 13, marginTop: 4 }}>
+                  <div style={{ color: "var(--text-secondary)", fontSize: 13, marginTop: 4 }}>
                     Bus ID: {alert.busId || "Unknown"} | Time: {new Date(alert.timestamp).toLocaleTimeString()}
                   </div>
                 </div>
-                <button 
-                  onClick={() => resolveSOS(alert.id)}
-                  style={{ backgroundColor: "#10b981", color: "#ffffff", border: "none", padding: "8px 16px", borderRadius: 8, cursor: "pointer", fontWeight: "bold" }}
-                >
-                  Mark Resolved
-                </button>
+                <button className="btnSuccess" onClick={() => resolveSOS(alert.id)}>Mark Resolved</button>
               </div>
             ))}
           </div>
         )}
 
         {/* Tab Content */}
-        {activeTab === "schools" && (
-          <div className="formAndRecords">
-            {adminRole === "super-admin" ? (
-              <Panel title="Add School">
-                <Field label="School ID" value={schoolForm.id} onChange={(value) => setSchoolForm((prev) => ({ ...prev, id: value }))} />
-                <Field label="School Name" value={schoolForm.name} onChange={(value) => setSchoolForm((prev) => ({ ...prev, name: value }))} />
-                <Field label="City" value={schoolForm.city} onChange={(value) => setSchoolForm((prev) => ({ ...prev, city: value }))} />
-                <Field label="Contact Email" value={schoolForm.contactEmail} onChange={(value) => setSchoolForm((prev) => ({ ...prev, contactEmail: value }))} />
-                <Field label="Transport Manager" value={schoolForm.transportManager} onChange={(value) => setSchoolForm((prev) => ({ ...prev, transportManager: value }))} />
-                <button className="primary" onClick={() => void saveSchool()}>Save School</button>
-              </Panel>
-            ) : (
-              <Panel title="Your School">
-                <div style={{ padding: "0 10px 10px", color: "var(--muted)", fontSize: 14 }}>
-                  As a School Admin, you can only view and manage your assigned school. To add a new school, contact a Super Admin.
-                </div>
-              </Panel>
-            )}
-
-            <Panel title={`Schools (${filteredSchools.length})`}>
-              <SearchBar value={searchTerm} onChange={setSearchTerm} placeholder="Search schools..." />
-              {filteredSchools.length ? filteredSchools.map((school) => (
-                <RecordLine
-                  key={school.id}
-                  title={school.name}
-                  subtitle={`${school.city} | ${school.id}`}
-                  meta={school.transportManager}
-                  onEdit={() => editSchool(school)}
-                  onDelete={() =>
-                    showConfirm(
-                      "Delete School",
-                      `Delete "${school.name}" and its related buses, users, and trips?`,
-                      () => { void deleteSchool(school.id); closeConfirm(); }
-                    )
-                  }
-                />
-              )) : (
-                <EmptyState
-                  icon="🏫"
-                  title="No schools found"
-                  text={searchTerm ? "Try a different search term." : "Add your first school using the form on the left."}
-                />
-              )}
-            </Panel>
-          </div>
-        )}
-
-        {activeTab === "buses" && (
-          <div className="formAndRecords">
-            <Panel title="Add Bus">
-              <Field label="Bus ID" value={busForm.id} onChange={(value) => setBusForm((prev) => ({ ...prev, id: value }))} />
-              {adminRole === "super-admin" && (
-                <Field label="School ID" value={busForm.schoolId} onChange={(value) => setBusForm((prev) => ({ ...prev, schoolId: value }))} />
-              )}
-              <Field label="Bus Label" value={busForm.label} onChange={(value) => setBusForm((prev) => ({ ...prev, label: value }))} />
-              <Field label="Plate Number" value={busForm.plateNumber} onChange={(value) => setBusForm((prev) => ({ ...prev, plateNumber: value }))} />
-              <label className="field">
-                <span>Driver Assignment</span>
-                <select
-                  value={busForm.driverId}
-                  onChange={(event) => setBusForm((prev) => ({ ...prev, driverId: event.target.value }))}
-                >
-                  <option value="">Select assigned driver</option>
-                  {availableDrivers.map((driver) => (
-                    <option key={driver.id} value={driver.id}>
-                      {driver.fullName} ({driver.id})
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <Field label="Route Name" value={busForm.routeName} onChange={(value) => setBusForm((prev) => ({ ...prev, routeName: value }))} />
-              <Field label="Capacity" value={String(busForm.capacity)} onChange={(value) => setBusForm((prev) => ({ ...prev, capacity: Number(value || 0) }))} />
-              <Field
-                label="Route Stops"
-                value={routeStopsInput}
-                onChange={setRouteStopsInput}
-                placeholder="One stop per line: Stop Name|07:35 or Stop Name|latitude|longitude|07:35"
-                multiline
-              />
-              <button className="primary" onClick={() => void saveBus()}>Save Bus</button>
-            </Panel>
-
-            <Panel title={`Buses (${filteredBuses.length})`}>
-              <SearchBar value={searchTerm} onChange={setSearchTerm} placeholder="Search buses..." />
-              {filteredBuses.length ? filteredBuses.map((bus) => (
-                <RecordLine
-                  key={bus.id}
-                  title={`${bus.label} | ${bus.id}`}
-                  subtitle={`${bus.routeName} | ${bus.plateNumber}`}
-                  meta={`Driver: ${bus.driverId || "Unassigned"}`}
-                  onEdit={() => void editBus(bus)}
-                  onDelete={() =>
-                    showConfirm(
-                      "Delete Bus",
-                      `Delete bus "${bus.label}" and its live route data?`,
-                      () => { void deleteBus(bus); closeConfirm(); }
-                    )
-                  }
-                />
-              )) : (
-                <EmptyState
-                  icon="🚌"
-                  title="No buses found"
-                  text={searchTerm ? "Try a different search term." : "Add your first bus using the form on the left."}
-                />
-              )}
-            </Panel>
-          </div>
-        )}
-
-        {activeTab === "users" && (
-          <div className="formAndRecords">
-            <Panel title="Add User">
-              <Field label="User ID" value={userForm.id} onChange={(value) => setUserForm((prev) => ({ ...prev, id: value }))} />
-              {adminRole === "super-admin" && (
-                <Field label="School ID" value={userForm.schoolId} onChange={(value) => setUserForm((prev) => ({ ...prev, schoolId: value }))} />
-              )}
-              <Field label="Full Name" value={userForm.fullName} onChange={(value) => setUserForm((prev) => ({ ...prev, fullName: value }))} />
-              <Field label="Email" value={userForm.email} onChange={(value) => setUserForm((prev) => ({ ...prev, email: value }))} />
-              <label className="field">
-                <span>Role</span>
-                <select
-                  value={userForm.role}
-                  onChange={(event) => setUserForm((prev) => ({ ...prev, role: event.target.value as UserRecord["role"] }))}
-                >
-                  <option value="parent">Parent</option>
-                  <option value="driver">Driver</option>
-                  <option value="school-admin">School Admin</option>
-                  {adminRole === "super-admin" && <option value="super-admin">Super Admin</option>}
-                </select>
-              </label>
-              <Field label="Phone" value={userForm.phone} onChange={(value) => setUserForm((prev) => ({ ...prev, phone: value }))} />
-              <label className="field">
-                <span>Assigned Bus</span>
-                <select
-                  value={userForm.busId ?? ""}
-                  onChange={(event) => setUserForm((prev) => ({ ...prev, busId: event.target.value }))}
-                >
-                  <option value="">Select bus</option>
-                  {buses.map((bus) => (
-                    <option key={bus.id} value={bus.id}>
-                      {bus.label} ({bus.id})
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <Field label="Student Name" value={userForm.studentName ?? ""} onChange={(value) => setUserForm((prev) => ({ ...prev, studentName: value }))} />
-              <Field label="Stop Name" value={userForm.stopName ?? ""} onChange={(value) => setUserForm((prev) => ({ ...prev, stopName: value }))} />
-              <button className="primary" onClick={() => void saveUser()}>Save User</button>
-            </Panel>
-
-            <Panel title={`Users (${filteredUsers.length})`}>
-              <div style={{ display: "flex", gap: "12px", alignItems: "center", marginBottom: "1rem" }}>
-                <div style={{ flex: 1 }}>
-                  <SearchBar value={searchTerm} onChange={setSearchTerm} placeholder="Search users..." />
-                </div>
-                <button className="secondary" onClick={() => downloadCSV(filteredUsers, "users_export.csv")}>Download CSV</button>
-              </div>
-              {filteredUsers.length ? filteredUsers.map((user) => (
-                <RecordLine
-                  key={user.id}
-                  title={`${user.fullName} | ${user.role}`}
-                  subtitle={user.email}
-                  meta={`Bus: ${user.busId || "None"} | Student: ${user.studentName || "N/A"}`}
-                  onEdit={() => editUser(user)}
-                  onDelete={() =>
-                    showConfirm(
-                      "Delete User",
-                      `Delete user "${user.fullName}" from Firebase data?`,
-                      () => { void deleteUser(user); closeConfirm(); }
-                    )
-                  }
-                />
-              )) : (
-                <EmptyState
-                  icon="👥"
-                  title="No users found"
-                  text={searchTerm ? "Try a different search term." : "Add your first user using the form on the left."}
-                />
-              )}
-            </Panel>
-          </div>
-        )}
-
-        {activeTab === "trips" && (
-          <div className="singleCol">
-            <Panel title={`Trip History (${filteredTrips.length})`}>
-              <div style={{ display: "flex", gap: "12px", alignItems: "center", marginBottom: "1rem" }}>
-                <div style={{ flex: 1 }}>
-                  <SearchBar value={searchTerm} onChange={setSearchTerm} placeholder="Search trips..." />
-                </div>
-                <button className="secondary" onClick={() => downloadCSV(filteredTrips, "trips_export.csv")}>Download CSV</button>
-              </div>
-              {filteredTrips.length ? filteredTrips.map((trip) => (
-                <RecordLine
-                  key={trip.id}
-                  title={`${trip.busLabel || trip.busId} | ${trip.status}`}
-                  subtitle={`${trip.driverName} | ${trip.routeName}`}
-                  meta={`${trip.startedAt}${trip.endedAt ? ` → ${trip.endedAt}` : ""}`}
-                />
-              )) : (
-                <EmptyState
-                  icon="📋"
-                  title="No trips found"
-                  text={searchTerm ? "Try a different search term." : "Trips will appear here once drivers start publishing routes."}
-                />
-              )}
-            </Panel>
-          </div>
-        )}
+        {activeTab === "dashboard" && <DashboardOverviewTab schools={schools} buses={buses} users={users} trips={trips} activeSOS={activeSOS} setActiveTab={setActiveTab} setSchoolForm={setSchoolForm} setUserForm={setUserForm} />}
+        {activeTab === "schools" && <SchoolsTab schools={schools} searchTerm={searchTerm} setSearchTerm={setSearchTerm} adminRole={adminRole} schoolForm={schoolForm} schoolPassword={schoolPassword} setSchoolPassword={setSchoolPassword} setSchoolForm={setSchoolForm} saveSchool={saveSchool} editSchool={editSchool} showConfirm={showConfirm} deleteSchool={deleteSchool} />}
+        {activeTab === "buses" && <BusesTab buses={buses} users={users} searchTerm={searchTerm} setSearchTerm={setSearchTerm} adminRole={adminRole} busForm={busForm} setBusForm={setBusForm} saveBus={saveBus} editBus={editBus} showConfirm={showConfirm} deleteBus={deleteBus} routeStops={routeStops} setRouteStops={setRouteStops} />}
+        {activeTab === "users" && <UsersTab users={users} searchTerm={searchTerm} setSearchTerm={setSearchTerm} adminRole={adminRole} userForm={userForm} setUserForm={setUserForm} userPassword={userPassword} setUserPassword={setUserPassword} saveUser={saveUser} editUser={editUser} showConfirm={showConfirm} deleteUser={deleteUser} />}
+        {activeTab === "trips" && <TripsTab trips={trips} searchTerm={searchTerm} setSearchTerm={setSearchTerm} />}
+        {activeTab === "drivers" && <DriversTab users={users.filter(u => u.role === "driver")} adminRole={adminRole} userForm={userForm} setUserForm={setUserForm} userPassword={userPassword} setUserPassword={setUserPassword} saveUser={saveUser} editUser={editUser} deleteUser={deleteUser} showConfirm={showConfirm} />}
+        {activeTab === "students" && <StudentsTab users={users.filter(u => u.role === "parent")} editUser={editUser} />}
+        {activeTab === "routes" && <RoutesTab buses={buses} />}
+        {activeTab === "subscription-plans" && <SubscriptionPlansTab />}
+        {activeTab === "subscriptions" && <SubscriptionsTab schools={schools} />}
+        {activeTab === "notifications" && <NotificationsTab />}
+        {activeTab === "alert-settings" && <AlertSettingsTab adminSchoolId={adminSchoolId} />}
+        {activeTab === "reports" && <ReportsTab trips={trips} />}
       </main>
 
       {/* Toast Notifications */}
@@ -997,6 +998,7 @@ export default function Page() {
           message={confirmState.message}
           onConfirm={confirmState.onConfirm}
           onCancel={closeConfirm}
+          confirmLabel={confirmState.confirmLabel}
         />
       )}
     </div>
@@ -1040,16 +1042,25 @@ function ToastContainer({ toasts }: { toasts: Toast[] }) {
 }
 
 /* ─── Confirm Modal ─── */
-function ConfirmModal({ title, message, onConfirm, onCancel }: { title: string; message: string; onConfirm: () => void; onCancel: () => void }) {
+function ConfirmModal({ title, message, onConfirm, onCancel, confirmLabel = "Delete" }: { 
+  title: string; message: string; onConfirm: () => void; onCancel: () => void; confirmLabel?: string 
+}) {
   return (
     <div className="modalOverlay" onClick={onCancel}>
       <div className="modalCard" onClick={(e) => e.stopPropagation()}>
-        <div className="modalIcon">⚠️</div>
-        <h3 className="modalTitle">{title}</h3>
-        <p className="modalMessage">{message}</p>
+        <div className="modalHeader">
+          <div className="modalIcon">🛑</div>
+          <div>
+            <h3 className="modalTitle">{title}</h3>
+            <p className="modalMessage">{message || "This action is permanent and cannot be undone."}</p>
+          </div>
+        </div>
         <div className="modalButtons">
-          <button className="ghost" onClick={onCancel}>Cancel</button>
-          <button className="primary dangerBtn" onClick={onConfirm}>Delete</button>
+          <button className="btnGhost" onClick={onCancel}>Cancel</button>
+          <button className="btnDanger" onClick={() => {
+            onConfirm();
+            onCancel();
+          }}>{confirmLabel}</button>
         </div>
       </div>
     </div>
@@ -1257,58 +1268,36 @@ function parseRouteStops(input: string, busId: string): RouteStop[] {
 }
 
 async function geocodeRouteStops(
-  input: string,
+  stops: Partial<RouteStop>[],
   busId: string,
   school: SchoolRecord | null
 ): Promise<RouteStop[]> {
-  const rows = input
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
+  const finalStops: RouteStop[] = [];
 
-  const routeStops: RouteStop[] = [];
+  for (const [index, stop] of stops.entries()) {
+    let { name, latitude, longitude, scheduledTime } = stop;
+    
+    // Default name if missing
+    if (!name) name = `Stop ${index + 1}`;
 
-  for (const [index, line] of rows.entries()) {
-    const parts = line.split("|").map((part) => part.trim());
-    const name = parts[0] || `Stop ${index + 1}`;
-
-    let latitude: number | null = null;
-    let longitude: number | null = null;
-    let scheduledTime = "";
-
-    if (parts.length >= 4 && isNumeric(parts[1]) && isNumeric(parts[2])) {
-      latitude = Number(parts[1]);
-      longitude = Number(parts[2]);
-      scheduledTime = parts[3] || "";
-    } else if (parts.length >= 2) {
-      scheduledTime = parts[1] || "";
-    }
-
-    if (latitude === null || longitude === null) {
+    // Geocode if lat/lng are missing
+    if (latitude === undefined || longitude === undefined || latitude === null || longitude === null) {
       const resolvedLocation = await geocodeStopByName(name, school);
       latitude = resolvedLocation?.latitude ?? 28.6139;
       longitude = resolvedLocation?.longitude ?? 77.209;
     }
 
-    routeStops.push({
+    finalStops.push({
       id: `${busId}-stop-${index + 1}`,
       name,
       latitude,
       longitude,
       order: index + 1,
-      scheduledTime
+      scheduledTime: scheduledTime || ""
     });
   }
 
-  return routeStops;
-}
-
-function formatRouteStops(routeStops: RouteStop[]) {
-  return routeStops
-    .slice()
-    .sort((left, right) => left.order - right.order)
-    .map((stop) => `${stop.name}|${stop.latitude}|${stop.longitude}|${stop.scheduledTime}`)
-    .join("\n");
+  return finalStops;
 }
 
 async function geocodeStopByName(name: string, school: SchoolRecord | null) {

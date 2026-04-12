@@ -11,14 +11,17 @@
     "dev:driver": "cross-env EXPO_PUBLIC_APP_TARGET=driver npm --workspace @skoolpath/driver-app run start",
     "dev:admin": "cross-env EXPO_PUBLIC_APP_TARGET=admin npm --workspace @skoolpath/admin-dashboard run start",
     "dev:admin-web": "npm --workspace @skoolpath/admin-dashboard-web run dev",
+    "dev:school-admin-web": "npm --workspace @skoolpath/school-admin-web run dev",
     "web:parent": "cross-env EXPO_PUBLIC_APP_TARGET=parent npm --workspace @skoolpath/parent-app run web",
     "web:driver": "cross-env EXPO_PUBLIC_APP_TARGET=driver npm --workspace @skoolpath/driver-app run web",
     "web:admin": "cross-env EXPO_PUBLIC_APP_TARGET=admin npm --workspace @skoolpath/admin-dashboard run web",
     "web:admin-web": "npm --workspace @skoolpath/admin-dashboard-web run dev",
+    "web:school-admin-web": "npm --workspace @skoolpath/school-admin-web run dev",
     "serve:parent": "cross-env EXPO_PUBLIC_APP_TARGET=parent npx expo start --web --port 8081",
     "serve:driver": "cross-env EXPO_PUBLIC_APP_TARGET=driver npx expo start --web --port 8082",
     "serve:admin": "cross-env EXPO_PUBLIC_APP_TARGET=admin npx expo start --web --port 8083",
     "serve:admin-web": "npm --workspace @skoolpath/admin-dashboard-web run dev",
+    "serve:school-admin-web": "npm --workspace @skoolpath/school-admin-web run dev",
     "typecheck": "npm --workspaces --if-present run typecheck"
   },
   "devDependencies": {

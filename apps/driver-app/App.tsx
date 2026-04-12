@@ -2,12 +2,17 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Location from "expo-location";
 import * as TaskManager from "expo-task-manager";
 import * as Network from 'expo-network';
-import { doc, serverTimestamp, setDoc, type DocumentReference } from "firebase/firestore";
+import * as Notifications from "expo-notifications";
+import { doc, serverTimestamp, setDoc, onSnapshot, query, where, limit, type DocumentReference } from "firebase/firestore";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
   Animated,
+  Dimensions,
+  Easing,
+  Image,
+  Platform,
   SafeAreaView,
   ScrollView,
   StyleSheet,
@@ -36,7 +41,10 @@ import {
   signInUser,
   signOutUser,
   signUpUser,
-  getNotificationsCollection
+  getNotificationsCollection,
+  getAlertConfigsCollection,
+  type AlertConfig,
+  type AppNotification
 } from "@skoolpath/shared";
 
 type DriverScreen = "login" | "register" | "console";
@@ -103,18 +111,38 @@ export default function App() {
   const [currentLocation, setCurrentLocation] = useState<BusLiveLocation>(createDefaultBusState());
   const [tripActive, setTripActive] = useState(false);
   const [activeTripId, setActiveTripId] = useState("");
-  const [statusMessage, setStatusMessage] = useState("Login to access the driver console.");
+  const [statusMessage, setStatusMessage] = useState("System ready.");
+  const [syncStatus, setInternalSyncStatus] = useState("Idle");
   const [lastSync, setLastSync] = useState<Date | null>(null);
+  const [realNotifications, setRealNotifications] = useState<AppNotification[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isTripLoading, setIsTripLoading] = useState(false);
   const [isDataLoading, setIsDataLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState("dashboard");
   const [showScrollTop, setShowScrollTop] = useState(false);
   const [isOffline, setIsOffline] = useState(false);
   const [syncQueue, setSyncQueue] = useState<SyncItem[]>([]);
+  const [alertConfig, setAlertConfig] = useState<AlertConfig | null>(null);
+  const latestLocationRef = useRef<BusLiveLocation>(currentLocation);
   const watchRef = useRef<Location.LocationSubscription | null>(null);
   const scrollRef = useRef<ScrollView>(null);
   const firebaseReady = hasFirebaseConfig();
   const db = useMemo(() => (firebaseReady ? getFirebaseDb() : null), [firebaseReady]);
+
+  useEffect(() => {
+    latestLocationRef.current = currentLocation;
+  }, [currentLocation]);
+
+  useEffect(() => {
+    if (!firebaseReady || !db) return;
+    const targetDocId = currentLocation.schoolId || "global_settings";
+    const unsub = onSnapshot(doc(getAlertConfigsCollection(db), targetDocId), (snap) => {
+      if (snap.exists()) {
+        setAlertConfig(snap.data() as AlertConfig);
+      }
+    });
+    return () => unsub();
+  }, [firebaseReady, db, currentLocation.schoolId]);
 
   useEffect(() => {
     setIsDataLoading(true);
@@ -140,6 +168,41 @@ export default function App() {
       void flushQueue();
     }
   }, [isOffline, syncQueue.length]);
+
+  // Notification Listener for Drivers
+  useEffect(() => {
+    if (!db || !driverEmail) return;
+
+    const notifQuery = query(
+      getNotificationsCollection(db),
+      where("targetEmail", "in", [driverEmail, "global", "all_drivers"]),
+      limit(20)
+    );
+
+    const unsubscribe = onSnapshot(notifQuery, (snapshot) => {
+      const list = snapshot.docs
+        .map(docSnap => ({ ...docSnap.data(), id: docSnap.id } as AppNotification))
+        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+      setRealNotifications(list);
+
+      if (!snapshot.metadata.fromCache && snapshot.docChanges().length > 0) {
+        snapshot.docChanges().forEach(change => {
+          if (change.type === "added") {
+            const data = change.doc.data();
+            Notifications.scheduleNotificationAsync({
+              content: { title: data.title, body: data.message, sound: true },
+              trigger: null
+            });
+          }
+        });
+      }
+    }, (error) => {
+      console.error("Driver Notif Listener Error:", error);
+    });
+
+    return () => unsubscribe();
+  }, [db, driverEmail]);
 
   const busRef = useMemo(() => {
     if (!db || !currentLocation.schoolId.trim() || !currentLocation.busId.trim()) return null;
@@ -177,10 +240,13 @@ export default function App() {
     await safeSetDoc(doc(getTripsCollection(db), tripId), { ...data, updatedAt: serverTimestamp() }, { merge: true });
   };
 
-  const syncLocation = async (location: Location.LocationObject) => {
-    const nextStop = getNextStop(currentLocation.routeStops, currentLocation.currentStopId);
+  const syncLocation = async (location: Location.LocationObject, overrideTripId?: string) => {
+    const locState = latestLocationRef.current;
+    const nextStop = getNextStop(locState.routeStops, locState.currentStopId);
+    const activeId = overrideTripId || activeTripId;
+    
     const nextLocation: BusLiveLocation = {
-      ...currentLocation, driverName, tripActive: true,
+      ...locState, driverName, tripActive: !!activeId,
       latitude: location.coords.latitude, longitude: location.coords.longitude,
       speed: location.coords.speed ?? 0, heading: location.coords.heading ?? 0,
       accuracy: location.coords.accuracy ?? null,
@@ -188,17 +254,29 @@ export default function App() {
       lastEvent: nextStop ? `Heading to ${nextStop.name}` : "Sharing live location",
       updatedAt: new Date().toISOString()
     };
+    
+    // Check speed threshold
+    const currentSpeedKmH = (location.coords.speed ?? 0) * 3.6;
+    let nextStatus = "Live location synced to Firestore.";
+    if (alertConfig && (alertConfig as any).velocity > 0 && currentSpeedKmH > (alertConfig as any).velocity) {
+      nextStatus = `⚠️ SPEEDING: ${Math.round(currentSpeedKmH)} km/h (Limit: ${(alertConfig as any).velocity} km/h)`;
+      if (activeId && Math.random() < 0.1) {
+         sendAppNotification("system", "admin", "Speed Limit Exceeded", `Driver ${driverName} (${locState.busId}) driving at ${Math.round(currentSpeedKmH)} km/h`);
+      }
+    }
+
     setCurrentLocation(nextLocation);
-    await persistSession("console", nextLocation, activeTripId);
-    if (!busRef) { setSyncStatus("Demo mode active. Add Firebase keys to enable real-time sync."); return; }
+    await persistSession("console", nextLocation, activeId);
+    if (!busRef) { setSyncStatus("Demo mode active. Live sync disabled."); return; }
     await safeSetDoc(busRef, { ...nextLocation, updatedAt: serverTimestamp() }, { merge: true });
-    if (activeTripId) {
-      await persistTripRecord(activeTripId, {
+    
+    if (activeId) {
+      await persistTripRecord(activeId, {
         lastKnownLatitude: nextLocation.latitude, lastKnownLongitude: nextLocation.longitude,
         lastKnownSpeed: nextLocation.speed, lastEvent: nextLocation.lastEvent, status: "active"
       });
     }
-    setSyncStatus("Live location synced to Firestore.");
+    setSyncStatus(nextStatus);
   };
 
   const requestLocationPermissions = async () => {
@@ -211,36 +289,23 @@ export default function App() {
   const startTrip = async () => {
     try {
       setIsTripLoading(true);
+      setSyncStatus("Initializing location services...");
       await requestLocationPermissions();
-      const location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
-      await syncLocation(location);
-      const tripId = `${currentLocation.busId || "bus"}-${Date.now()}`;
-      setActiveTripId(tripId);
       
-      await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
-        accuracy: Location.Accuracy.Balanced,
-        timeInterval: 10000,
-        distanceInterval: 10,
-        deferredUpdatesInterval: 10000,
-        foregroundService: {
-          notificationTitle: "SkoolPath Driver",
-          notificationBody: "Live tracking is running in the background.",
-          notificationColor: "#2563eb",
-        },
-      });
-
-      watchRef.current?.remove();
-      watchRef.current = await Location.watchPositionAsync(
-        { accuracy: Location.Accuracy.BestForNavigation, timeInterval: 5000, distanceInterval: 10 },
-        syncLocation
-      );
+      const tripId = `${currentLocation.busId || "bus"}-${Date.now()}`;
+      const location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+      
+      // 1. Set trip ID first to allow syncLocation to recognize it
+      setActiveTripId(tripId);
       setTripActive(true);
-      const updatedRouteStops = currentLocation.routeStops.map((stop) => 
-        stop.id === currentLocation.currentStopId ? { ...stop, actualArrivalTime: new Date().toISOString() } : stop
+
+      // 2. Initialize the trip record in Firestore
+      const updatedRouteStops = currentLocation.routeStops.map((stop, i) => 
+        i === 0 ? { ...stop, actualArrivalTime: new Date().toISOString() } : stop
       );
       const nextLocation = { ...currentLocation, routeStops: updatedRouteStops, tripActive: true, lastEvent: "Trip started" };
       setCurrentLocation(nextLocation);
-      await persistSession("console", nextLocation, tripId);
+
       await persistTripRecord(tripId, {
         id: tripId, schoolId: nextLocation.schoolId, busId: nextLocation.busId,
         busLabel: nextLocation.busLabel, routeName: nextLocation.routeName,
@@ -250,40 +315,82 @@ export default function App() {
         lastKnownSpeed: location.coords.speed ?? 0, lastEvent: "Trip started",
         totalStudents: nextLocation.students.length
       });
+
+      // 3. Start background/foreground tracking (Mobile only)
+      if (Platform.OS !== 'web') {
+        await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
+          accuracy: Location.Accuracy.Balanced,
+          timeInterval: 8000,
+          distanceInterval: 10,
+          foregroundService: {
+            notificationTitle: "SkoolPath Driver",
+            notificationBody: "Reporting live location to school and parents.",
+            notificationColor: "#2563eb",
+          },
+        });
+      }
+
+      watchRef.current?.remove();
+      watchRef.current = await Location.watchPositionAsync(
+        { accuracy: Location.Accuracy.BestForNavigation, timeInterval: 5000, distanceInterval: 10 },
+        (loc) => syncLocation(loc, tripId) // Pass tripId explicitly
+      );
+
+      await persistSession("console", nextLocation, tripId);
       await sendAppNotification("driver", `bus_${nextLocation.busId}`, "Trip Started", `The bus has started its route.`);
+      setSyncStatus("Trip is now live.");
     } catch (error) {
-      Alert.alert("Unable to start trip", error instanceof Error ? error.message : "Unknown error");
+      Alert.alert("Startup Failed", error instanceof Error ? error.message : "Unknown error");
     } finally {
       setIsTripLoading(false);
     }
   };
 
   const stopTrip = async () => {
-    setIsTripLoading(true);
-    const hasStarted = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
-    if (hasStarted) {
-      await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
+    try {
+      setIsTripLoading(true);
+      setSyncStatus("Finalizing trip records...");
+      if (Platform.OS !== 'web') {
+        const hasStarted = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
+        if (hasStarted) await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
+      }
+      
+      watchRef.current?.remove();
+      watchRef.current = null;
+      
+      const tripId = activeTripId;
+      setTripActive(false);
+      setActiveTripId("");
+
+      const nextLocation: BusLiveLocation = { 
+        ...currentLocation, 
+        tripActive: false, speed: 0, 
+        currentStopId: "", currentStopName: "None", nextStopId: "", nextStopName: "Standby",
+        lastEvent: "Trip completed", updatedAt: new Date().toISOString() 
+      };
+      
+      setCurrentLocation(nextLocation);
+      await persistSession("console", nextLocation, "");
+      
+      if (busRef) {
+        await safeSetDoc(busRef, { ...nextLocation, updatedAt: serverTimestamp(), endedAt: serverTimestamp() }, { merge: true });
+      }
+      
+      if (tripId) {
+        await persistTripRecord(tripId, {
+          endedAt: new Date().toISOString(), status: "completed",
+          lastKnownLatitude: nextLocation.latitude, lastKnownLongitude: nextLocation.longitude,
+          lastKnownSpeed: 0, lastEvent: "Trip completed"
+        });
+      }
+      
+      await sendAppNotification("driver", `bus_${nextLocation.busId}`, "Trip Completed", `The bus has finished its entire route.`);
+      setSyncStatus("Standby mode active.");
+    } catch (error) {
+       console.error("Stop Trip Error:", error);
+    } finally {
+      setIsTripLoading(false);
     }
-    watchRef.current?.remove();
-    watchRef.current = null;
-    setTripActive(false);
-    const nextLocation = { ...currentLocation, tripActive: false, speed: 0, lastEvent: "Trip completed", updatedAt: new Date().toISOString() };
-    setCurrentLocation(nextLocation);
-    await persistSession("console", nextLocation, "");
-    const tripId = activeTripId;
-    setActiveTripId("");
-    if (busRef) {
-      await safeSetDoc(busRef, { ...nextLocation, updatedAt: serverTimestamp(), endedAt: serverTimestamp() }, { merge: true });
-    }
-    if (tripId) {
-      await persistTripRecord(tripId, {
-        endedAt: new Date().toISOString(), status: "completed",
-        lastKnownLatitude: nextLocation.latitude, lastKnownLongitude: nextLocation.longitude,
-        lastKnownSpeed: 0, lastEvent: "Trip completed", totalStudents: nextLocation.students.length
-      });
-    }
-    await sendAppNotification("driver", `bus_${nextLocation.busId}`, "Trip Completed", `The bus has finished its entire route.`);
-    setSyncStatus("Trip stopped and synced.");
   };
 
   const loadQueue = async () => {
@@ -473,7 +580,12 @@ export default function App() {
 
   const goToNextStop = async () => {
     const nextStop = getNextStop(currentLocation.routeStops, currentLocation.currentStopId);
-    if (!nextStop) { setSyncStatus("No route stops are configured yet."); return; }
+    if (!nextStop) { setSyncStatus("No remaining stops found."); return; }
+    
+    // Check if next stop was actually found (findIndex didn't return last stop)
+    const isActuallyNew = nextStop.id !== currentLocation.currentStopId;
+    if (!isActuallyNew) { setSyncStatus("Already at the last stop."); return; }
+
     const futureStop = getNextStop(currentLocation.routeStops, nextStop.id);
     
     const updatedRouteStops = currentLocation.routeStops.map((stop) =>
@@ -485,13 +597,14 @@ export default function App() {
       routeStops: updatedRouteStops,
       currentStopId: nextStop.id, currentStopName: nextStop.name,
       nextStopId: futureStop?.id ?? "", nextStopName: futureStop?.name ?? "",
-      latitude: nextStop.latitude, longitude: nextStop.longitude,
       lastEvent: `Arrived at ${nextStop.name}`, updatedAt: new Date().toISOString()
     };
+    
     setCurrentLocation(nextLocation);
     await persistSession("console", nextLocation, activeTripId);
     if (busRef) { await safeSetDoc(busRef, { ...nextLocation, updatedAt: serverTimestamp() }, { merge: true }); }
-    await sendAppNotification("driver", `bus_${nextLocation.busId}`, "Bus Moving", `The bus has arrived at ${nextStop.name} and is heading to the next stop.`);
+    await sendAppNotification("driver", `bus_${nextLocation.busId}`, "Bus Moving", `The bus has arrived at ${nextStop.name} and is heading to the next destination.`);
+    setSyncStatus(`Arrived: ${nextStop.name}`);
   };
 
   const studentCounts = useMemo(() => {
@@ -537,121 +650,178 @@ export default function App() {
   return (
     <SafeAreaView style={styles.container}>
       <ScrollView ref={scrollRef} contentContainerStyle={styles.content} onScroll={handleScroll} scrollEventThrottle={100}>
-        <HeroCard kicker="Driver Console" title="Manage the trip in one focused workspace."
-          subtitle="Publish GPS, move stop-by-stop, and keep parent updates accurate throughout the route."
-          metrics={[
-            { label: "Trip", value: tripActive ? "Active" : "Idle" },
-            { label: "Bus", value: currentLocation.busLabel || "Unassigned" },
-            { label: "Next", value: currentLocation.nextStopName || "No stop" }
-          ]} />
-
-        <View style={[styles.banner, { backgroundColor: tripActive ? "#dcfce7" : "#fef3c7" }]}>
-          <Text style={[styles.bannerText, { color: tripActive ? "#14532d" : "#92400e" }]}>
-            {tripActive ? "🟢  Trip is active — broadcasting live GPS" : "⏸  Trip is idle — press Start Trip to begin"}
-          </Text>
-        </View>
-
-        {currentLocation.students.length > 0 && (
-          isDataLoading ? <SkeletonCard height={90} /> : <AttendanceProgressBar counts={studentCounts} />
-        )}
-
-        {currentLocation.routeStops.length > 0 && (
-          isDataLoading ? <SkeletonCard height={100} /> : (
-            <StopStepper stops={currentLocation.routeStops} currentStopId={currentLocation.currentStopId} nextStopId={currentLocation.nextStopId} />
-          )
-        )}
-
-        <View style={styles.card}>
-          <Text style={styles.sectionTitle}>Trip Setup</Text>
-          <FloatingInput label="School ID" value={currentLocation.schoolId}
-            onChangeText={(v) => setCurrentLocation((p) => ({ ...p, schoolId: v }))} />
-          <FloatingInput label="Bus ID" value={currentLocation.busId}
-            onChangeText={(v) => setCurrentLocation((p) => ({ ...p, busId: v }))} />
-          <FloatingInput label="Driver ID" value={currentLocation.driverId}
-            onChangeText={(v) => setCurrentLocation((p) => ({ ...p, driverId: v }))} />
-          <FloatingInput label="Route Name" value={currentLocation.routeName}
-            onChangeText={(v) => setCurrentLocation((p) => ({ ...p, routeName: v }))} />
-          <View style={styles.buttonRow}>
-            <GradientButton style={{ flex: 1 }} icon="▶" label="Start Trip" onPress={() => void startTrip()} colors={["#16a34a", "#15803d"]} disabled={tripActive} loading={isTripLoading && !tripActive} />
-            <GradientButton style={{ flex: 1 }} icon="⏹" label="Stop Trip" onPress={() => void stopTrip()} colors={["#dc2626", "#b91c1c"]} disabled={!tripActive} loading={isTripLoading && tripActive} />
-          </View>
-          <View style={styles.buttonRow}>
-            <GradientButton style={{ flex: 1 }} icon="⏭" label="Next Stop" onPress={() => void goToNextStop()} colors={["#2563eb", "#1d4ed8"]} />
-            <GradientButton style={{ flex: 1 }} icon="🚪" label="Logout" onPress={() => void handleLogout()} colors={["#64748b", "#475569"]} />
-          </View>
-          <StatusLine message={statusMessage} connected={isConnected} />
-        </View>
-
-        <MapSurface currentLocation={currentLocation} />
-
-        <View style={styles.grid}>
-          {isDataLoading ? (
-            <><SkeletonCard height={140} /><SkeletonCard height={140} /></>
-          ) : (
-            <>
-              <InfoCard icon="📡" title="Live Status" lines={[
-                `Current stop: ${currentLocation.currentStopName}`, `Next stop: ${currentLocation.nextStopName}`,
-                `Last event: ${currentLocation.lastEvent}`, `Last update: ${formatTimestamp(currentLocation.updatedAt)}`
+        {activeTab === "dashboard" ? (
+          <FadeInView delay={100} style={{ gap: 16 }}>
+            <HeroCard kicker="Mission Control" title={`Hey, ${driverName || "Driver"}`}
+              subtitle="Your active instrument cluster for real-time trip management and telemetry."
+              metrics={[
+                { label: "Trip", value: tripActive ? "Live" : "Idle" },
+                { label: "Bus", value: currentLocation.busLabel || "None" },
+                { label: "Pax", value: `${studentCounts.boarded}/${studentCounts.total}` }
               ]} />
-              <InfoCard icon="🧭" title="Route Snapshot" lines={[
-                `Latitude: ${currentLocation.latitude.toFixed(5)}`, `Longitude: ${currentLocation.longitude.toFixed(5)}`,
-                `Speed: ${Math.round(currentLocation.speed)} m/s`, `Heading: ${Math.round(currentLocation.heading)} deg`
-              ]} />
-            </>
-          )}
-        </View>
 
-        <View style={styles.timelineCard}>
-          <View style={styles.cardHeader}>
-            <Text style={styles.cardIcon}>👨‍🎓</Text>
-            <Text style={styles.sectionTitle}>Student Attendance</Text>
-          </View>
-          {isDataLoading ? <SkeletonCard height={200} /> :
-            currentLocation.students.length ? currentLocation.students.map((student) => (
-            <View key={student.id} style={styles.studentRow}>
-              <View style={styles.studentInfo}>
-                <View style={[
-                  styles.studentAvatar,
-                  student.status === "boarded" ? styles.avatarBoarded
-                    : student.status === "dropped" ? styles.avatarDropped : styles.avatarWaiting
-                ]}>
-                  <Text style={styles.avatarText}>{student.name.charAt(0).toUpperCase()}</Text>
-                </View>
-                <View style={styles.studentCopy}>
-                  <Text style={styles.studentName}>{student.name}</Text>
-                  <Text style={styles.studentMeta}>
-                    {student.stopName} • <Text style={[
-                      styles.studentStatusText,
-                      student.status === "boarded" ? { color: "#16a34a" }
-                        : student.status === "dropped" ? { color: "#2563eb" } : { color: "#f59e0b" }
-                    ]}>{student.status}</Text>
-                  </Text>
-                </View>
-              </View>
-              <View style={styles.attendanceButtons}>
-                <ScaleButton
-                  style={[styles.attendBtn, styles.boardedBtn, student.status === "boarded" && styles.attendBtnActive]}
-                  onPress={() => void updateStudentStatus(student.id, "boarded")}>
-                  <Text style={[styles.attendBtnText, student.status === "boarded" && styles.attendBtnTextActive]}>✓ Boarded</Text>
-                </ScaleButton>
-                <ScaleButton
-                  style={[styles.attendBtn, styles.droppedBtn, student.status === "dropped" && styles.attendBtnActiveBlue]}
-                  onPress={() => void updateStudentStatus(student.id, "dropped")}>
-                  <Text style={[styles.attendBtnText, student.status === "dropped" && styles.attendBtnTextActive]}>↓ Dropped</Text>
-                </ScaleButton>
-              </View>
+            <View style={[styles.banner, { backgroundColor: tripActive ? "#0f172a" : "#f1f5f9" }]}>
+              <Text style={[styles.bannerText, { color: tripActive ? "#60a5fa" : "#64748b" }]}>
+                {tripActive ? "📡  Broadcasting Live GPS Signal" : "💤  System standby — start trip to begin"}
+              </Text>
             </View>
-          )) : <Text style={styles.infoLine}>No students are assigned yet. Add them from the admin dashboard.</Text>}
-        </View>
+
+            <View style={styles.card}>
+              <Text style={styles.sectionTitle}>Trip Controls</Text>
+              <View style={styles.buttonRow}>
+                <GradientButton style={{ flex: 1 }} icon="▶" label="Start" onPress={() => void startTrip()} colors={["#16a34a", "#15803d"]} disabled={tripActive} />
+                <GradientButton style={{ flex: 1 }} icon="⏹" label="Stop" onPress={() => void stopTrip()} colors={["#dc2626", "#b91c1c"]} disabled={!tripActive} />
+              </View>
+              <GradientButton icon="⏭" label="Arrive at Next Stop" onPress={() => void goToNextStop()} colors={["#2563eb", "#1d4ed8"]} disabled={!tripActive} />
+            </View>
+
+            <View style={styles.grid}>
+              <InfoCard icon="📍" title="Next Destination" lines={[`Target: ${currentLocation.nextStopName || "Finish"}`, `Status: In Pursuit`]} />
+              <InfoCard icon="⚡" title="Telemetry" lines={[`Speed: ${Math.round(currentLocation.speed)} m/s`, `Signal: ${isConnected ? "Strong" : "Weak"}`]} />
+            </View>
+
+            {realNotifications.length > 0 && (
+              <InfoCard icon="🔔" title="Admin Announcements" 
+                lines={realNotifications.slice(0, 2).map(n => `${n.title}: ${n.message}`)} 
+              />
+            )}
+
+            <GradientButton 
+              icon="🚨" 
+              label="HOLD TO TRIGGER SOS" 
+              onPress={() => Alert.alert("SOS Trigger", "Hold the button for 2 seconds to alert emergency services.")} 
+              colors={["#ef4444", "#991b1b"]} 
+              style={{ marginTop: 10 }}
+            />
+          </FadeInView>
+        ) : activeTab === "route" ? (
+          <FadeInView delay={100} style={{ gap: 16 }}>
+            <MapSurface currentLocation={currentLocation} />
+            <AttendanceProgressBar counts={studentCounts} />
+            <StopStepper stops={currentLocation.routeStops} currentStopId={currentLocation.currentStopId} nextStopId={currentLocation.nextStopId} />
+            
+            <View style={styles.timelineCard}>
+              <View style={styles.cardHeader}><Text style={styles.cardIcon}>👨‍🎓</Text><Text style={styles.sectionTitle}>Students</Text></View>
+              {currentLocation.students.map((student) => (
+                <View key={student.id} style={styles.studentRow}>
+                  <View style={styles.studentInfo}>
+                    <View style={[styles.studentAvatar, student.status === "boarded" ? styles.avatarBoarded : student.status === "dropped" ? styles.avatarDropped : styles.avatarWaiting]}>
+                      <Text style={styles.avatarText}>{student.name.charAt(0)}</Text>
+                    </View>
+                    <View style={styles.studentCopy}>
+                      <Text style={styles.studentName}>{student.name}</Text>
+                      <Text style={styles.studentMeta}>{student.stopName} • {student.status}</Text>
+                    </View>
+                  </View>
+                  <View style={styles.attendanceButtons}>
+                    <ScaleButton style={[styles.attendBtn, styles.boardedBtn, student.status === "boarded" && styles.attendBtnActive]} onPress={() => void updateStudentStatus(student.id, "boarded")}>
+                      <Text style={[styles.attendBtnText, student.status === "boarded" && styles.attendBtnTextActive]}>Board</Text>
+                    </ScaleButton>
+                    <ScaleButton style={[styles.attendBtn, styles.droppedBtn, student.status === "dropped" && styles.attendBtnActiveBlue]} onPress={() => void updateStudentStatus(student.id, "dropped")}>
+                      <Text style={[styles.attendBtnText, student.status === "dropped" && styles.attendBtnTextActive]}>Drop</Text>
+                    </ScaleButton>
+                  </View>
+                </View>
+              ))}
+            </View>
+          </FadeInView>
+        ) : (
+          <FadeInView delay={100} style={styles.card}>
+            <Text style={styles.sectionTitle}>Configurations</Text>
+            <FloatingInput label="Admin School ID" value={currentLocation.schoolId} onChangeText={(v) => setCurrentLocation((p) => ({ ...p, schoolId: v }))} />
+            <FloatingInput label="Bus Identifier" value={currentLocation.busId} onChangeText={(v) => setCurrentLocation((p) => ({ ...p, busId: v }))} />
+            <FloatingInput label="Driver ID" value={currentLocation.driverId} onChangeText={(v) => setCurrentLocation((p) => ({ ...p, driverId: v }))} />
+            <GradientButton icon="🚪" label="Sign Out" onPress={() => void handleLogout()} colors={["#64748b", "#475569"]} />
+            <StatusLine message={statusMessage} connected={isConnected} />
+          </FadeInView>
+        )}
       </ScrollView>
 
+      <BottomNavBar activeTab={activeTab} onTabChange={setActiveTab} />
+
       {showScrollTop && (
-        <TouchableOpacity style={styles.scrollTopFab}
+        <TouchableOpacity style={[styles.scrollTopFab, { bottom: 100 }]}
           onPress={() => scrollRef.current?.scrollTo({ y: 0, animated: true })} activeOpacity={0.8}>
           <Text style={styles.scrollTopIcon}>↑</Text>
         </TouchableOpacity>
       )}
     </SafeAreaView>
+  );
+}
+
+function BottomNavBar({ activeTab, onTabChange }: { activeTab: string; onTabChange: (t: string) => void }) {
+  return (
+    <View style={styles.bottomNav}>
+      <TabItem icon="🎮" label="Console" active={activeTab === "dashboard"} onPress={() => onTabChange("dashboard")} />
+      <TabItem icon="🗺️" label="Route" active={activeTab === "route"} onPress={() => onTabChange("route")} />
+      <TabItem icon="⚙️" label="Settings" active={activeTab === "settings"} onPress={() => onTabChange("settings")} />
+    </View>
+  );
+}
+
+function TabItem({ icon, label, active, onPress }: { icon: string; label: string; active: boolean; onPress: () => void }) {
+  return (
+    <TouchableOpacity onPress={onPress} style={[styles.tabItem, active && styles.tabItemActive]}>
+      <Text style={[styles.tabIcon, active && { opacity: 1 }]}>{icon}</Text>
+      <Text style={[styles.tabLabel, active && styles.tabLabelActive]}>{label}</Text>
+    </TouchableOpacity>
+  );
+}
+
+/* ─── Modern Animation Wrappers ─── */
+
+function FadeInView({ children, delay = 0, style }: { children: React.ReactNode; delay?: number; style?: any }) {
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const slideAnim = useRef(new Animated.Value(20)).current;
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.timing(fadeAnim, { toValue: 1, duration: 600, delay, useNativeDriver: false }),
+      Animated.timing(slideAnim, { toValue: 0, duration: 600, delay, useNativeDriver: false, easing: Easing.out(Easing.back(1.5)) })
+    ]).start();
+  }, [fadeAnim, slideAnim, delay]);
+
+  return (
+    <Animated.View style={[style, { opacity: fadeAnim, transform: [{ translateY: slideAnim }] }]}>
+      {children}
+    </Animated.View>
+  );
+}
+
+function GlowingOrb({ color, size, top, left, delay = 0 }: { color: string; size: number; top?: number; left?: number; delay?: number }) {
+  const pulse = useRef(new Animated.Value(1)).current;
+  useEffect(() => {
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, { toValue: 1.3, duration: 4000 + delay, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(pulse, { toValue: 1, duration: 4000 + delay, useNativeDriver: false, easing: Easing.inOut(Easing.sin) })
+      ])
+    ).start();
+  }, [pulse, delay]);
+
+  return (
+    <Animated.View style={{
+      position: "absolute", width: size, height: size, borderRadius: size / 2, backgroundColor: color,
+      top: top, left: left, opacity: 0.1, transform: [{ scale: pulse }],
+      pointerEvents: "none"
+    } as any} />
+  );
+}
+
+function DrivingBus() {
+  const busAnim = useRef(new Animated.Value(-100)).current;
+  const screenWidth = Dimensions.get("window").width;
+
+  useEffect(() => {
+    Animated.loop(
+      Animated.timing(busAnim, { toValue: screenWidth + 100, duration: 12000, easing: Easing.linear, useNativeDriver: false })
+    ).start();
+  }, [busAnim, screenWidth]);
+
+  return (
+    <View style={[styles.busTrack, { pointerEvents: "none" }]}>
+      <Animated.Text style={[styles.busEmoji, { transform: [{ translateX: busAnim }] }]}>🚌</Animated.Text>
+    </View>
   );
 }
 
@@ -661,8 +831,8 @@ function PulsingDot({ color }: { color: string }) {
   const pulse = useRef(new Animated.Value(1)).current;
   useEffect(() => {
     const a = Animated.loop(Animated.sequence([
-      Animated.timing(pulse, { toValue: 1.6, duration: 800, useNativeDriver: true }),
-      Animated.timing(pulse, { toValue: 1, duration: 800, useNativeDriver: true })
+      Animated.timing(pulse, { toValue: 1.6, duration: 800, useNativeDriver: false }),
+      Animated.timing(pulse, { toValue: 1, duration: 800, useNativeDriver: false })
     ]));
     a.start();
     return () => a.stop();
@@ -675,8 +845,8 @@ function StatusLine({ message, connected }: { message: string; connected: boolea
   useEffect(() => {
     if (connected) {
       const a = Animated.loop(Animated.sequence([
-        Animated.timing(pulse, { toValue: 0.4, duration: 1000, useNativeDriver: true }),
-        Animated.timing(pulse, { toValue: 1, duration: 1000, useNativeDriver: true })
+        Animated.timing(pulse, { toValue: 0.4, duration: 1000, useNativeDriver: false }),
+        Animated.timing(pulse, { toValue: 1, duration: 1000, useNativeDriver: false })
       ]));
       a.start();
       return () => a.stop();
@@ -691,17 +861,29 @@ function StatusLine({ message, connected }: { message: string; connected: boolea
 }
 
 function SkeletonCard({ height }: { height: number }) {
-  const shimmer = useRef(new Animated.Value(0)).current;
+  const pulse = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     const a = Animated.loop(Animated.sequence([
-      Animated.timing(shimmer, { toValue: 1, duration: 1200, useNativeDriver: true }),
-      Animated.timing(shimmer, { toValue: 0, duration: 1200, useNativeDriver: true })
+      Animated.timing(pulse, { toValue: 1, duration: 800, useNativeDriver: false }),
+      Animated.timing(pulse, { toValue: 0, duration: 800, useNativeDriver: false })
     ]));
     a.start();
     return () => a.stop();
-  }, [shimmer]);
+  }, [pulse]);
   return (
-    <Animated.View style={[styles.skeletonCard, { height, opacity: shimmer.interpolate({ inputRange: [0, 1], outputRange: [0.3, 0.7] }) }]}>
+    <Animated.View style={[styles.skeletonCard, {
+      height,
+      transform: [{
+        scale: pulse.interpolate({
+          inputRange: [0, 1],
+          outputRange: [0.95, 1.05]
+        })
+      }],
+      opacity: pulse.interpolate({
+        inputRange: [0, 1],
+        outputRange: [0.7, 1]
+      })
+    }]}>
       <View style={styles.skeletonLine} />
       <View style={[styles.skeletonLine, { width: "60%" as never }]} />
       <View style={[styles.skeletonLine, { width: "40%" as never }]} />
@@ -714,8 +896,8 @@ function ScaleButton({ style, onPress, children }: { style: any; onPress: () => 
   return (
     <Animated.View style={{ transform: [{ scale }] }}>
       <TouchableOpacity style={style} onPress={onPress} activeOpacity={1}
-        onPressIn={() => Animated.spring(scale, { toValue: 0.93, useNativeDriver: true, speed: 50, bounciness: 4 }).start()}
-        onPressOut={() => Animated.spring(scale, { toValue: 1, useNativeDriver: true, speed: 50, bounciness: 4 }).start()}>
+        onPressIn={() => Animated.spring(scale, { toValue: 0.93, useNativeDriver: false, speed: 50, bounciness: 4 }).start()}
+        onPressOut={() => Animated.spring(scale, { toValue: 1, useNativeDriver: false, speed: 50, bounciness: 4 }).start()}>
         {children}
       </TouchableOpacity>
     </Animated.View>
@@ -791,15 +973,26 @@ function AuthLayout({ title, subtitle, switchLabel, switchActionLabel, onSwitch,
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.authShell}>
-        <View style={styles.authGradientTop} /><View style={styles.authGradientBottom} />
-        <HeroCard kicker="SkoolPath" title={title} subtitle={subtitle} metrics={[]} />
-        <View style={styles.authCard}>
+        <GlowingOrb color="#2563eb" size={300} top={-100} left={-100} />
+        <GlowingOrb color="#3b82f6" size={250} top={Dimensions.get("window").height - 200} left={Dimensions.get("window").width - 150} delay={1000} />
+        
+        <FadeInView delay={100} style={{ alignItems: "center", marginBottom: 10 }}>
+          <Image source={require("./assets/logo.png")} resizeMode="contain" style={{ width: 100, height: 100 }} />
+        </FadeInView>
+
+        <FadeInView delay={200}>
+          <HeroCard kicker="SkoolPath Driver" title={title} subtitle={subtitle} metrics={[]} />
+        </FadeInView>
+
+        <FadeInView delay={400} style={styles.authCard}>
           {children}
           <StatusLine message={statusMessage} connected={false} />
           <TouchableOpacity onPress={onSwitch} style={styles.switchWrap}>
             <Text style={styles.switchLine}>{switchLabel}{" "}<Text style={styles.switchAction}>{switchActionLabel}</Text></Text>
           </TouchableOpacity>
-        </View>
+        </FadeInView>
+        
+        <DrivingBus />
       </View>
     </SafeAreaView>
   );
@@ -864,9 +1057,7 @@ function GradientButton({ icon, label, onPress, loading, colors, disabled, style
     <Animated.View style={[style, { transform: [{ scale }] }]}>
       <TouchableOpacity
         style={[styles.gradientButton, { backgroundColor: colors[0] }, (disabled || loading) && styles.styledButtonDisabled]}
-        onPress={onPress} disabled={disabled || loading} activeOpacity={1}
-        onPressIn={() => Animated.spring(scale, { toValue: 0.95, useNativeDriver: true, speed: 50, bounciness: 4 }).start()}
-        onPressOut={() => Animated.spring(scale, { toValue: 1, useNativeDriver: true, speed: 50, bounciness: 4 }).start()}>
+        onPress={onPress} disabled={disabled || loading} activeOpacity={1}>
         {loading ? <ActivityIndicator size="small" color="#ffffff" /> : <Text style={styles.gradientButtonIcon}>{icon}</Text>}
         <Text style={styles.gradientButtonLabel}>{label}</Text>
       </TouchableOpacity>
@@ -889,110 +1080,168 @@ function InfoCard({ icon, title, lines }: { icon: string; title: string; lines: 
 
 /* ─── Styles ─── */
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#eff6ff" },
-  content: { padding: 20, gap: 16, paddingBottom: 80 },
+  container: { flex: 1, backgroundColor: "#f8fafc" },
+  content: { padding: 20, gap: 16, paddingBottom: 100 },
 
-  authShell: { flex: 1, padding: 20, justifyContent: "center", gap: 18 },
-  authGradientTop: { position: "absolute", top: 0, left: 0, right: 0, height: 260, backgroundColor: "#0f172a", borderBottomLeftRadius: 40, borderBottomRightRadius: 40, opacity: 0.06 },
-  authGradientBottom: { position: "absolute", bottom: 0, left: 0, right: 0, height: 200, backgroundColor: "#2563eb", borderTopLeftRadius: 40, borderTopRightRadius: 40, opacity: 0.04 },
-  authCard: { backgroundColor: "#ffffff", borderRadius: 24, padding: 22, gap: 14, shadowColor: "#0f172a", shadowOffset: { width: 0, height: 16 }, shadowOpacity: 0.08, shadowRadius: 32, elevation: 8 },
-  switchWrap: { paddingVertical: 4 },
+  authShell: { flex: 1, padding: 24, justifyContent: "center", gap: 14, backgroundColor: "#ffffff" },
+  authCard: { 
+    backgroundColor: "rgba(255, 255, 255, 0.9)", 
+    borderRadius: 32, 
+    padding: 24, 
+    gap: 16, 
+    boxShadow: "0 20px 40px rgba(15, 23, 42, 0.1)",
+    elevation: 10,
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.5)"
+  },
+  switchWrap: { paddingVertical: 8, alignItems: "center" },
 
-  heroCard: { backgroundColor: "#0f172a", borderRadius: 28, padding: 24, gap: 10, overflow: "hidden" },
-  heroAccentDot: { position: "absolute", top: -30, right: -30, width: 120, height: 120, borderRadius: 60, backgroundColor: "rgba(37, 99, 235, 0.25)" },
-  kicker: { color: "#93c5fd", textTransform: "uppercase", fontSize: 12, letterSpacing: 1.5, fontWeight: "700" },
-  title: { color: "#ffffff", fontSize: 28, fontWeight: "800", letterSpacing: -0.5 },
-  subtitle: { color: "#cbd5e1", fontSize: 15, lineHeight: 22 },
+  heroCard: { 
+    backgroundColor: "#0f172a", 
+    borderRadius: 32, 
+    padding: 26, 
+    gap: 12, 
+    overflow: "hidden",
+    boxShadow: "0 12px 24px rgba(15, 23, 42, 0.3)",
+    elevation: 8
+  },
+  heroAccentDot: { position: "absolute", top: -40, right: -40, width: 140, height: 140, borderRadius: 70, backgroundColor: "rgba(37, 99, 235, 0.3)" },
+  kicker: { color: "#60a5fa", textTransform: "uppercase", fontSize: 13, letterSpacing: 2, fontWeight: "800" },
+  title: { color: "#ffffff", fontSize: 32, fontWeight: "900", letterSpacing: -1 },
+  subtitle: { color: "#94a3b8", fontSize: 16, lineHeight: 24 },
 
-  banner: { borderRadius: 18, paddingHorizontal: 18, paddingVertical: 14, shadowColor: "#0f172a", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.04, shadowRadius: 8, elevation: 2 },
-  bannerText: { fontSize: 15, fontWeight: "600", lineHeight: 22 },
+  busTrack: {
+    position: "absolute",
+    bottom: 20,
+    left: 0,
+    right: 0,
+    height: 40,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(15, 23, 42, 0.05)",
+    justifyContent: "center"
+  },
+  busEmoji: { fontSize: 32 },
 
-  statusRow: { flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 2 },
-  statusDotView: { width: 8, height: 8, borderRadius: 4 },
-  statusText: { color: "#1e3a8a", fontSize: 14, lineHeight: 20, flex: 1 },
-  switchLine: { color: "#475467", fontSize: 14 },
-  switchAction: { color: "#2563eb", fontWeight: "700" },
+  banner: { borderRadius: 20, paddingHorizontal: 20, paddingVertical: 16, boxShadow: "0 4px 10px rgba(15, 23, 42, 0.05)", elevation: 2 },
+  bannerText: { fontSize: 16, fontWeight: "700", lineHeight: 24 },
 
-  progressCard: { backgroundColor: "#ffffff", borderRadius: 24, padding: 20, gap: 12, shadowColor: "#0f172a", shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.04, shadowRadius: 16, elevation: 2 },
-  progressHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  progressTitle: { fontSize: 17, fontWeight: "800", color: "#0f172a" },
-  progressCount: { fontSize: 15, fontWeight: "700", color: "#64748b" },
-  progressBar: { flexDirection: "row", height: 10, borderRadius: 5, overflow: "hidden", backgroundColor: "#f1f5f9" },
-  progressSegment: { height: 10 },
-  progressLegend: { flexDirection: "row", gap: 16, flexWrap: "wrap" },
-  legendItem: { flexDirection: "row", alignItems: "center", gap: 6 },
-  legendDot: { width: 8, height: 8, borderRadius: 4 },
-  legendText: { fontSize: 13, color: "#64748b", fontWeight: "600" },
+  statusRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 4, justifyContent: "center" },
+  statusDotView: { width: 10, height: 10, borderRadius: 5 },
+  statusText: { color: "#475569", fontSize: 14, fontWeight: "600" },
+  switchLine: { color: "#64748b", fontSize: 15 },
+  switchAction: { color: "#2563eb", fontWeight: "800" },
 
-  stepperCard: { backgroundColor: "#ffffff", borderRadius: 24, padding: 20, gap: 10, shadowColor: "#0f172a", shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.04, shadowRadius: 16, elevation: 2 },
-  stepperLabel: { fontSize: 13, fontWeight: "700", color: "#64748b", textTransform: "uppercase", letterSpacing: 1 },
-  stepperRow: { paddingVertical: 8 },
-  stepperItem: { alignItems: "center", width: 80 },
-  stepperDotRow: { flexDirection: "row", alignItems: "center", width: 80, justifyContent: "center" },
-  stepperDot: { width: 24, height: 24, borderRadius: 12, alignItems: "center", justifyContent: "center", zIndex: 1 },
-  stepperDotCurrent: { backgroundColor: "#16a34a", shadowColor: "#16a34a", shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.4, shadowRadius: 8, elevation: 4 },
-  stepperDotNext: { backgroundColor: "#2563eb", borderWidth: 3, borderColor: "#bfdbfe" },
-  stepperDotPassed: { backgroundColor: "#bbf7d0", borderWidth: 2, borderColor: "#16a34a" },
-  stepperDotIdle: { backgroundColor: "#e2e8f0", borderWidth: 2, borderColor: "#cbd5e1" },
-  stepperDotIcon: { color: "#ffffff", fontSize: 10, fontWeight: "800" },
-  stepperCheckIcon: { color: "#16a34a", fontSize: 12, fontWeight: "800" },
-  stepperLine: { position: "absolute", left: 50, right: -30, height: 3, backgroundColor: "#e2e8f0", zIndex: 0 },
+  progressCard: { backgroundColor: "#ffffff", borderRadius: 28, padding: 22, boxShadow: "0 10px 20px rgba(15, 23, 42, 0.05)", elevation: 3 },
+  progressHeader: { flexDirection: "row", justifyContent: "space-between", marginBottom: 16 },
+  progressTitle: { fontSize: 18, fontWeight: "900", color: "#0f172a" },
+  progressCount: { fontSize: 16, fontWeight: "800", color: "#64748b" },
+  progressBar: { flexDirection: "row", height: 12, borderRadius: 6, overflow: "hidden", backgroundColor: "#f1f5f9" },
+  progressSegment: { height: 12 },
+  progressLegend: { flexDirection: "row", gap: 18, flexWrap: "wrap", marginTop: 16 },
+  legendItem: { flexDirection: "row", alignItems: "center", gap: 8 },
+  legendDot: { width: 10, height: 10, borderRadius: 5 },
+  legendText: { fontSize: 14, color: "#64748b", fontWeight: "700" },
+
+  stepperCard: { backgroundColor: "#ffffff", borderRadius: 28, padding: 22, boxShadow: "0 10px 20px rgba(15, 23, 42, 0.05)", elevation: 3 },
+  stepperLabel: { fontSize: 14, fontWeight: "800", color: "#64748b", textTransform: "uppercase", letterSpacing: 1.5 },
+  stepperRow: { paddingVertical: 12 },
+  stepperItem: { alignItems: "center", width: 90 },
+  stepperDotRow: { flexDirection: "row", alignItems: "center", width: 90, justifyContent: "center" },
+  stepperDot: { width: 28, height: 28, borderRadius: 14, alignItems: "center", justifyContent: "center", zIndex: 1 },
+  stepperDotCurrent: { backgroundColor: "#16a34a", boxShadow: "0 0 10px #16a34a", elevation: 6 },
+  stepperDotNext: { backgroundColor: "#2563eb", borderWidth: 4, borderColor: "#bfdbfe" },
+  stepperDotPassed: { backgroundColor: "#dcfce7", borderWidth: 2, borderColor: "#16a34a" },
+  stepperDotIdle: { backgroundColor: "#f1f5f9", borderWidth: 2, borderColor: "#e2e8f0" },
+  stepperDotIcon: { color: "#ffffff", fontSize: 12, fontWeight: "900" },
+  stepperCheckIcon: { color: "#16a34a", fontSize: 14, fontWeight: "900" },
+  stepperLine: { position: "absolute", left: 55, right: -35, height: 4, backgroundColor: "#f1f5f9", zIndex: 0 },
   stepperLinePassed: { backgroundColor: "#16a34a" },
-  stepperName: { fontSize: 11, color: "#64748b", marginTop: 6, textAlign: "center" },
+  stepperName: { fontSize: 12, color: "#64748b", marginTop: 8, textAlign: "center", fontWeight: "600" },
 
-  card: { backgroundColor: "#ffffff", borderRadius: 24, padding: 18, gap: 10, shadowColor: "#0f172a", shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.04, shadowRadius: 16, elevation: 2 },
-  cardHeader: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 4 },
-  cardIcon: { fontSize: 20 },
-  sectionTitle: { color: "#0f172a", fontSize: 20, fontWeight: "800", letterSpacing: -0.3 },
+  card: { backgroundColor: "#ffffff", borderRadius: 28, padding: 22, gap: 12, boxShadow: "0 10px 20px rgba(15, 23, 42, 0.05)", elevation: 3 },
+  cardHeader: { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 6 },
+  cardIcon: { fontSize: 22 },
+  sectionTitle: { color: "#0f172a", fontSize: 22, fontWeight: "900", letterSpacing: -0.5 },
 
-  floatingWrap: { marginBottom: 4, position: "relative" },
-  floatingLabel: { position: "absolute", left: 14, zIndex: 1, fontWeight: "600" },
+  floatingWrap: { marginBottom: 6, position: "relative" },
+  floatingLabel: { position: "absolute", left: 16, zIndex: 1, fontWeight: "700" },
   inputRow: { flexDirection: "row", alignItems: "center" },
-  floatingInput: { flex: 1, borderWidth: 1.5, borderColor: "#e2e8f0", borderRadius: 16, paddingHorizontal: 14, paddingVertical: 15, backgroundColor: "#ffffff", color: "#0f172a", fontSize: 15 },
-  floatingInputFocused: { borderColor: "#2563eb", shadowColor: "#2563eb", shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.12, shadowRadius: 8, elevation: 3 },
-  inputWithToggle: { paddingRight: 70 },
-  validationIcon: { position: "absolute", right: 14 },
-  eyeButton: { position: "absolute", right: 12, padding: 4 },
-  eyeIcon: { fontSize: 18 },
+  floatingInput: { 
+    flex: 1, 
+    borderWidth: 2, 
+    borderColor: "#f1f5f9", 
+    borderRadius: 20, 
+    paddingHorizontal: 16, 
+    paddingVertical: 18, 
+    backgroundColor: "#ffffff", 
+    color: "#0f172a", 
+    fontSize: 16,
+    fontWeight: "600"
+  },
+  floatingInputFocused: { 
+    borderColor: "#2563eb", 
+    boxShadow: "0 0 10px rgba(37, 99, 237, 0.15)",
+    elevation: 4,
+    backgroundColor: "#ffffff"
+  },
+  inputWithToggle: { paddingRight: 75 },
+  validationIcon: { position: "absolute", right: 18 },
+  eyeButton: { position: "absolute", right: 16, padding: 6, borderRadius: 12, backgroundColor: "#f8fafc" },
+  eyeIcon: { fontSize: 20 },
 
-  gradientButton: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, borderRadius: 16, paddingHorizontal: 20, paddingVertical: 15, shadowColor: "#0f172a", shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.15, shadowRadius: 16, elevation: 6 },
-  styledButtonDisabled: { opacity: 0.4 },
-  gradientButtonIcon: { fontSize: 16 },
-  gradientButtonLabel: { color: "#ffffff", fontSize: 15, fontWeight: "700" },
-  buttonRow: { flexDirection: "row", justifyContent: "space-between", gap: 12 },
+  gradientButton: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10, borderRadius: 20, paddingHorizontal: 22, paddingVertical: 18, boxShadow: "0 10px 20px rgba(37, 99, 235, 0.25)", elevation: 8 },
+  styledButtonDisabled: { opacity: 0.5, shadowOpacity: 0 },
+  gradientButtonIcon: { fontSize: 18 },
+  gradientButtonLabel: { color: "#ffffff", fontSize: 17, fontWeight: "800" },
+  buttonRow: { flexDirection: "row", justifyContent: "space-between", gap: 14 },
 
-  metricRow: { flexDirection: "row", gap: 10, flexWrap: "wrap", marginTop: 6 },
-  metric: { backgroundColor: "#1e293b", borderRadius: 18, paddingHorizontal: 14, paddingVertical: 12, minWidth: 96, borderWidth: 1, borderColor: "rgba(148, 163, 184, 0.15)" },
-  metricLabel: { color: "#93c5fd", fontSize: 11, textTransform: "uppercase", fontWeight: "700", letterSpacing: 0.5 },
-  metricValue: { color: "#ffffff", fontSize: 17, fontWeight: "800", marginTop: 2 },
+  metricRow: { flexDirection: "row", gap: 12, flexWrap: "wrap", marginTop: 8 },
+  metric: { backgroundColor: "rgba(255, 255, 255, 0.08)", borderRadius: 20, paddingHorizontal: 16, paddingVertical: 14, minWidth: 104, borderWidth: 1, borderColor: "rgba(255, 255, 255, 0.1)" },
+  metricLabel: { color: "#60a5fa", fontSize: 12, textTransform: "uppercase", fontWeight: "800", letterSpacing: 1 },
+  metricValue: { color: "#ffffff", fontSize: 19, fontWeight: "900", marginTop: 4 },
 
-  grid: { gap: 16 },
-  infoLine: { color: "#334155", fontSize: 15, lineHeight: 22 },
+  grid: { gap: 18 },
+  infoLine: { color: "#475569", fontSize: 15, lineHeight: 24, fontWeight: "500" },
 
-  timelineCard: { backgroundColor: "#ffffff", borderRadius: 24, padding: 20, gap: 4, shadowColor: "#0f172a", shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.04, shadowRadius: 16, elevation: 2 },
-  studentRow: { gap: 10, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: "#f1f5f9" },
-  studentInfo: { flexDirection: "row", alignItems: "center", gap: 12 },
-  studentAvatar: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center" },
+  timelineCard: { backgroundColor: "#ffffff", borderRadius: 28, padding: 22, boxShadow: "0 10px 20px rgba(15, 23, 42, 0.05)", elevation: 3 },
+  studentRow: { gap: 12, paddingVertical: 14, borderBottomWidth: 1.5, borderBottomColor: "#f1f5f9" },
+  studentInfo: { flexDirection: "row", alignItems: "center", gap: 14 },
+  studentAvatar: { width: 48, height: 48, borderRadius: 24, alignItems: "center", justifyContent: "center" },
   avatarBoarded: { backgroundColor: "#dcfce7" },
   avatarDropped: { backgroundColor: "#dbeafe" },
-  avatarWaiting: { backgroundColor: "#fef3c7" },
-  avatarText: { fontSize: 16, fontWeight: "700", color: "#0f172a" },
-  studentCopy: { flex: 1, gap: 2 },
-  studentName: { color: "#0f172a", fontSize: 16, fontWeight: "700" },
-  studentMeta: { color: "#64748b", fontSize: 13 },
-  studentStatusText: { fontWeight: "700" },
-  attendanceButtons: { flexDirection: "row", gap: 8, marginTop: 2 },
-  attendBtn: { borderRadius: 12, paddingHorizontal: 14, paddingVertical: 9, borderWidth: 1.5 },
-  boardedBtn: { borderColor: "#bbf7d0", backgroundColor: "#f0fdf4" },
-  droppedBtn: { borderColor: "#bfdbfe", backgroundColor: "#eff6ff" },
+  avatarWaiting: { backgroundColor: "#fff7ed" },
+  avatarText: { fontSize: 18, fontWeight: "800", color: "#1e293b" },
+  studentCopy: { flex: 1, gap: 4 },
+  studentName: { color: "#0f172a", fontSize: 17, fontWeight: "800" },
+  studentMeta: { color: "#64748b", fontSize: 14, fontWeight: "600" },
+  studentStatusText: { fontWeight: "800" },
+  attendanceButtons: { flexDirection: "row", gap: 10, marginTop: 4 },
+  attendBtn: { borderRadius: 14, paddingHorizontal: 18, paddingVertical: 12, borderWidth: 2 },
+  boardedBtn: { borderColor: "#dcfce7", backgroundColor: "#f0fdf4" },
+  droppedBtn: { borderColor: "#dbeafe", backgroundColor: "#eff6ff" },
   attendBtnActive: { backgroundColor: "#16a34a", borderColor: "#16a34a" },
   attendBtnActiveBlue: { backgroundColor: "#2563eb", borderColor: "#2563eb" },
-  attendBtnText: { fontSize: 13, fontWeight: "700", color: "#334155" },
+  attendBtnText: { fontSize: 14, fontWeight: "800", color: "#475569" },
   attendBtnTextActive: { color: "#ffffff" },
 
-  skeletonCard: { backgroundColor: "#e2e8f0", borderRadius: 24, padding: 20, gap: 12, justifyContent: "center" },
-  skeletonLine: { height: 14, backgroundColor: "#cbd5e1", borderRadius: 8, width: "80%" as never },
+  skeletonCard: { backgroundColor: "#f1f5f9", borderRadius: 28, padding: 24, gap: 14, justifyContent: "center" },
+  skeletonLine: { height: 16, backgroundColor: "#e2e8f0", borderRadius: 10, width: "85%" as never },
 
-  scrollTopFab: { position: "absolute", bottom: 24, right: 24, width: 48, height: 48, borderRadius: 24, backgroundColor: "#0f172a", alignItems: "center", justifyContent: "center", shadowColor: "#0f172a", shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.2, shadowRadius: 12, elevation: 6 },
-  scrollTopIcon: { color: "#ffffff", fontSize: 20, fontWeight: "800" }
+  scrollTopFab: { position: "absolute", bottom: 30, right: 30, width: 56, height: 56, borderRadius: 28, backgroundColor: "#0f172a", alignItems: "center", justifyContent: "center", boxShadow: "0 12px 16px rgba(15, 23, 42, 0.3)", elevation: 8 },
+  scrollTopIcon: { color: "#ffffff", fontSize: 22, fontWeight: "900" },
+
+  /* Bottom Nav */
+  bottomNav: {
+    position: "absolute", bottom: 0, left: 0, right: 0, height: 85,
+    backgroundColor: "rgba(255, 255, 255, 0.85)", 
+    flexDirection: "row", justifyContent: "space-around", alignItems: "center",
+    borderTopWidth: 1, borderTopColor: "rgba(15, 23, 42, 0.05)",
+    paddingBottom: 20, paddingHorizontal: 10,
+    boxShadow: "0 -10px 15px rgba(0, 0, 0, 0.05)", elevation: 10
+  },
+  tabItem: { alignItems: "center", paddingVertical: 8, paddingHorizontal: 16, borderRadius: 20, gap: 4 },
+  tabItemActive: { backgroundColor: "rgba(37, 99, 235, 0.08)" },
+  tabIcon: { fontSize: 20, opacity: 0.6 },
+  tabLabel: { fontSize: 11, fontWeight: "700", color: "#64748b" },
+  tabLabelActive: { color: "#2563eb" }
 });

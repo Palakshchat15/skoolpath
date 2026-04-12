@@ -5,6 +5,9 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Animated,
+  Dimensions,
+  Easing,
+  Image,
   SafeAreaView,
   ScrollView,
   StyleSheet,
@@ -90,6 +93,7 @@ export default function App() {
   );
   const [busLocation, setBusLocation] = useState<BusLiveLocation>(createDefaultBusState());
   const [isLoading, setIsLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState("tracking"); // New: Tab state
   const [showScrollTop, setShowScrollTop] = useState(false);
   const [realNotifications, setRealNotifications] = useState<AppNotification[]>([]);
   const [showInbox, setShowInbox] = useState(false);
@@ -134,17 +138,20 @@ export default function App() {
 
     const notifQuery = query(
       getNotificationsCollection(db),
-      where("targetEmail", "in", [email, `bus_${busId}`]),
-      orderBy("timestamp", "desc"),
+      where("targetEmail", "in", [email, `bus_${busId}`, "all_parents", "route_parents"]),
       limit(20)
     );
 
     const unsubscribe = onSnapshot(notifQuery, (snapshot) => {
-      const list = snapshot.docs.map(docSnap => docSnap.data());
+      // Manual sorting to avoid Firestore composite index requirements
+      const list = snapshot.docs
+        .map(docSnap => ({ ...docSnap.data(), id: docSnap.id } as AppNotification))
+        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
       setRealNotifications(list);
 
       // Trigger local push for brand new notification
-      if (snapshot.docChanges().length > 0) {
+      if (!snapshot.metadata.fromCache && snapshot.docChanges().length > 0) {
         snapshot.docChanges().forEach(change => {
           if (change.type === "added") {
             const data = change.doc.data();
@@ -159,6 +166,8 @@ export default function App() {
           }
         });
       }
+    }, (error) => {
+      console.error("Parent Notif Listener Error:", error);
     });
 
     return () => unsubscribe();
@@ -447,149 +456,108 @@ export default function App() {
   /* ─── Tracking Screen ─── */
   return (
     <SafeAreaView style={styles.container}>
-      <ScrollView
-        ref={scrollRef}
-        contentContainerStyle={styles.content}
-        onScroll={handleScroll}
-        scrollEventThrottle={100}
-      >
-        <HeroCard
-          kicker="Parent Tracker"
-          title="Your child's ride, live and clear."
-          subtitle="Track the bus on a real map, watch ETA, and stay updated on every route event."
-          metrics={[
-            { label: "ETA", value: `${etaMinutes} min` },
-            { label: "Bus", value: busId || "Unassigned" },
-            { label: "Status", value: trackedStudent?.status ?? "Unknown" }
-          ]}
-        />
-
-        {/* Trip Status Banner */}
-        <TripStatusBanner
-          tripActive={busLocation.tripActive}
-          lastEvent={busLocation.lastEvent}
-          etaMinutes={etaMinutes}
-          stopName={trackedStop?.name ?? "your stop"}
-        />
-
-        {/* ETA Ring + Quick Info */}
-        {isDataLoading ? (
-          <SkeletonCard height={120} />
-        ) : (
-          <View style={styles.etaSection}>
-            <EtaRing etaMinutes={etaMinutes} maxMinutes={60} />
-            <View style={styles.etaInfo}>
-              <Text style={styles.etaInfoTitle}>Estimated Arrival</Text>
-              <Text style={styles.etaInfoValue}>{etaMinutes} min</Text>
-              <Text style={styles.etaInfoSub}>
-                {distanceKm.toFixed(1)} km away • {Math.round(busLocation.speed)} m/s
-              </Text>
-            </View>
-          </View>
-        )}
-
-        <View style={styles.card}>
-          <Text style={styles.sectionTitle}>Tracking Setup</Text>
-          <FloatingInput label="School ID" value={schoolId} onChangeText={setSchoolId} />
-          <FloatingInput label="Bus ID" value={busId} onChangeText={setBusId} />
-          <FloatingInput label="Student Name" value={studentName} onChangeText={setStudentName} />
-          <FloatingInput label="Pickup Stop" value={stopName} onChangeText={setStopName} />
-          <View style={styles.buttonRow}>
-            <GradientButton style={{ flex: 1 }} icon="💾" label="Save" onPress={() => void handleSave()} loading={isLoading} colors={["#16a34a", "#15803d"]} />
-            <GradientButton style={{ flex: 1 }} icon="🚪" label="Logout" onPress={() => void handleLogout()} colors={["#64748b", "#475569"]} />
-          </View>
-          <StatusLine message={statusMessage} connected={statusMessage.includes("connected") || statusMessage.includes("Signed in")} />
-        </View>
-
-        <MapSurface busLocation={busLocation} />
-
-        <View style={styles.grid}>
-          {isDataLoading ? (
-            <>
-              <SkeletonCard height={140} />
-              <SkeletonCard height={140} />
-            </>
-          ) : (
-            <>
-              <InfoCard icon="📋" title="Ride Summary" lines={[
-                `Student: ${studentName || "Not assigned yet"}`,
-                `Driver: ${busLocation.driverName || "No driver assigned"}`,
-                `Last synced: ${formatTimestamp(busLocation.updatedAt)}`,
-                `Heading: ${Math.round(busLocation.heading)} deg`
+      <ScrollView ref={scrollRef} contentContainerStyle={styles.content} onScroll={handleScroll} scrollEventThrottle={100}>
+        {activeTab === "tracking" ? (
+          <FadeInView delay={100} style={{ gap: 16 }}>
+            <HeroCard kicker="Parent Tracker" title="Your child's ride, live and clear."
+              subtitle="Track the bus on a real map, watch ETA, and stay updated on every route event."
+              metrics={[
+                { label: "ETA", value: `${etaMinutes} min` },
+                { label: "Bus", value: busId || "Unassigned" },
+                { label: "Status", value: trackedStudent?.status ?? "Unknown" }
               ]} />
-              <InfoCard 
-                icon="🔔" 
-                title="Notifications" 
-                lines={notificationsSummary} 
-                onPress={() => setShowInbox(true)}
-              />
-            </>
-          )}
-        </View>
 
-        {/* Enhanced Route Timeline */}
-        <View style={styles.timelineCard}>
-          <Text style={styles.sectionTitle}>Route Timeline</Text>
-          {isDataLoading ? (
-            <SkeletonCard height={200} />
-          ) : busLocation.routeStops.length ? busLocation.routeStops.map((stop, index) => {
-            const isCurrent = stop.id === busLocation.currentStopId;
-            const isNext = stop.id === busLocation.nextStopId;
-            const isLast = index === busLocation.routeStops.length - 1;
-            return (
-              <View key={stop.id} style={styles.timelineStop}>
-                <View style={styles.timelineDotCol}>
-                  <View style={[
-                    styles.timelineDot,
-                    isCurrent ? styles.timelineDotCurrent
-                      : isNext ? styles.timelineDotNext
-                        : styles.timelineDotIdle
-                  ]}>
-                    {isCurrent && <PulsingDot color="#16a34a" />}
-                  </View>
-                  {!isLast && <View style={styles.timelineLine} />}
-                </View>
-                <View style={styles.timelineContent}>
-                  <View style={styles.timelineRow}>
-                    <View>
-                      <Text style={[styles.stopName, isCurrent && styles.stopNameCurrent]}>
-                        {stop.name}
-                      </Text>
-                      <Text style={styles.stopTime}>Scheduled: {stop.scheduledTime}</Text>
-                      {stop.actualArrivalTime && (() => {
-                        const delayInfo = calculateDelay(stop.scheduledTime, stop.actualArrivalTime);
-                        if (!delayInfo) return null;
-                        const timeStr = new Date(stop.actualArrivalTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                        const delayColor = delayInfo.status === "ontime" ? "#16a34a" : delayInfo.status === "delayed" ? "#dc2626" : "#2563eb";
-                        return (
-                          <Text style={{ fontSize: 13, fontWeight: "600", marginTop: 2, color: delayColor }}>
-                            ↳ Arrived {timeStr} ({delayInfo.text})
-                          </Text>
-                        );
-                      })()}
-                    </View>
-                    {(isCurrent || isNext) && (
-                      <View style={[styles.stopBadge, isCurrent ? styles.badgeCurrent : styles.badgeNext]}>
-                        <Text style={styles.stopBadgeText}>
-                          {isCurrent ? "● Current" : "◎ Next"}
-                        </Text>
-                      </View>
-                    )}
-                  </View>
+            <TripStatusBanner tripActive={busLocation.tripActive} lastEvent={busLocation.lastEvent} etaMinutes={etaMinutes} stopName={trackedStop?.name ?? "your stop"} />
+
+            {isDataLoading ? <SkeletonCard height={120} /> : (
+              <View style={styles.etaSection}>
+                <EtaRing etaMinutes={etaMinutes} maxMinutes={60} />
+                <View style={styles.etaInfo}>
+                  <Text style={styles.etaInfoTitle}>Estimated Arrival</Text>
+                  <Text style={styles.etaInfoValue}>{etaMinutes} min</Text>
+                  <Text style={styles.etaInfoSub}>{distanceKm.toFixed(1)} km away • {Math.round(busLocation.speed)} m/s</Text>
                 </View>
               </View>
-            );
-          }) : <Text style={styles.infoLine}>No route stops yet. Add bus and route information from the admin dashboard.</Text>}
-        </View>
+            )}
+
+            <MapSurface busLocation={busLocation} />
+
+            <View style={styles.grid}>
+              {isDataLoading ? (
+                <><SkeletonCard height={140} /><SkeletonCard height={140} /></>
+              ) : (
+                <>
+                  <InfoCard icon="📋" title="Ride Summary" lines={[
+                    `Student: ${studentName || "Not assigned yet"}`,
+                    `Driver: ${busLocation.driverName || "No driver assigned"}`,
+                    `Last synced: ${formatTimestamp(busLocation.updatedAt)}`
+                  ]} />
+                  <InfoCard icon="🔔" title="Notifications" lines={notificationsSummary} onPress={() => setShowInbox(true)} />
+                </>
+              )}
+            </View>
+
+            <View style={styles.timelineCard}>
+              <Text style={styles.sectionTitle}>Route Timeline</Text>
+              {isDataLoading ? <SkeletonCard height={200} /> : 
+                busLocation.routeStops.length ? busLocation.routeStops.map((stop, index) => {
+                  const isCurrent = stop.id === busLocation.currentStopId;
+                  const isNext = stop.id === busLocation.nextStopId;
+                  const isLast = index === busLocation.routeStops.length - 1;
+                  return (
+                    <View key={stop.id} style={styles.timelineStop}>
+                      <View style={styles.timelineDotCol}>
+                        <View style={[styles.timelineDot, isCurrent ? styles.timelineDotCurrent : isNext ? styles.timelineDotNext : styles.timelineDotIdle]}>
+                          {isCurrent && <PulsingDot color="#16a34a" />}
+                        </View>
+                        {!isLast && <View style={styles.timelineLine} />}
+                      </View>
+                      <View style={styles.timelineContent}>
+                        <View style={styles.timelineRow}>
+                          <View>
+                            <Text style={[styles.stopName, isCurrent && styles.stopNameCurrent]}>{stop.name}</Text>
+                            <Text style={styles.stopTime}>Scheduled: {stop.scheduledTime}</Text>
+                          </View>
+                          {(isCurrent || isNext) && (
+                            <View style={[styles.stopBadge, isCurrent ? styles.badgeCurrent : styles.badgeNext]}>
+                              <Text style={styles.stopBadgeText}>{isCurrent ? "● Current" : "◎ Next"}</Text>
+                            </View>
+                          )}
+                        </View>
+                      </View>
+                    </View>
+                  );
+                }) : <Text style={styles.infoLine}>No route stops yet.</Text>
+              }
+            </View>
+          </FadeInView>
+        ) : activeTab === "notifications" ? (
+          <FadeInView delay={100} style={{ gap: 16 }}>
+            <InfoCard icon="🔔" title="Recent Alerts" lines={notificationsSummary} />
+            {realNotifications.map(n => (
+              <View key={n.id} style={styles.card}>
+                <Text style={{ fontWeight: "800" }}>{n.title}</Text>
+                <Text style={{ color: "#64748b" }}>{n.message}</Text>
+              </View>
+            ))}
+          </FadeInView>
+        ) : (
+          <FadeInView delay={100} style={styles.card}>
+            <Text style={styles.sectionTitle}>Account Settings</Text>
+            <FloatingInput label="Full Name" value={fullName} onChangeText={setFullName} />
+            <FloatingInput label="Email" value={email} onChangeText={setEmail} />
+            <FloatingInput label="Assigned Bus ID" value={busId} onChangeText={setBusId} />
+            <TouchableOpacity onPress={() => void handleLogout()} style={{ marginTop: 10 }}>
+              <StatusLine message="Tap here to sign out" connected={false} />
+            </TouchableOpacity>
+          </FadeInView>
+        )}
       </ScrollView>
 
-      {/* Scroll-to-top FAB */}
+      <BottomNavBar activeTab={activeTab} onTabChange={setActiveTab} />
+      
       {showScrollTop && (
-        <TouchableOpacity
-          style={styles.scrollTopFab}
-          onPress={() => scrollRef.current?.scrollTo({ y: 0, animated: true })}
-          activeOpacity={0.8}
-        >
+        <TouchableOpacity style={[styles.scrollTopFab, { bottom: 100 }]} onPress={() => scrollRef.current?.scrollTo({ y: 0, animated: true })} activeOpacity={0.8}>
           <Text style={styles.scrollTopIcon}>↑</Text>
         </TouchableOpacity>
       )}
@@ -630,6 +598,82 @@ export default function App() {
         </View>
       </Modal>
     </SafeAreaView>
+  );
+}
+
+/* ─── Navigation ─── */
+function BottomNavBar({ activeTab, onTabChange }: { activeTab: string; onTabChange: (t: string) => void }) {
+  return (
+    <View style={styles.bottomNav}>
+      <TabItem icon="🗺️" label="Track" active={activeTab === "tracking"} onPress={() => onTabChange("tracking")} />
+      <TabItem icon="🔔" label="Alerts" active={activeTab === "notifications"} onPress={() => onTabChange("notifications")} />
+      <TabItem icon="👤" label="Profile" active={activeTab === "settings"} onPress={() => onTabChange("settings")} />
+    </View>
+  );
+}
+
+function TabItem({ icon, label, active, onPress }: { icon: string; label: string; active: boolean; onPress: () => void }) {
+  return (
+    <TouchableOpacity onPress={onPress} style={[styles.tabItem, active && styles.tabItemActive]}>
+      <Text style={[styles.tabIcon, active && { opacity: 1 }]}>{icon}</Text>
+      <Text style={[styles.tabLabel, active && styles.tabLabelActive]}>{label}</Text>
+    </TouchableOpacity>
+  );
+}
+
+/* ─── Modern Animation Wrappers ─── */
+
+function FadeInView({ children, delay = 0, style }: { children: React.ReactNode; delay?: number; style?: any }) {
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const slideAnim = useRef(new Animated.Value(20)).current;
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.timing(fadeAnim, { toValue: 1, duration: 600, delay, useNativeDriver: false }),
+      Animated.timing(slideAnim, { toValue: 0, duration: 600, delay, useNativeDriver: false, easing: Easing.out(Easing.back(1.5)) })
+    ]).start();
+  }, [fadeAnim, slideAnim, delay]);
+
+  return (
+    <Animated.View style={[style, { opacity: fadeAnim, transform: [{ translateY: slideAnim }] }]}>
+      {children}
+    </Animated.View>
+  );
+}
+
+function GlowingOrb({ color, size, top, left, delay = 0 }: { color: string; size: number; top?: number; left?: number; delay?: number }) {
+  const pulse = useRef(new Animated.Value(1)).current;
+  useEffect(() => {
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, { toValue: 1.3, duration: 4000 + delay, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(pulse, { toValue: 1, duration: 4000 + delay, useNativeDriver: false, easing: Easing.inOut(Easing.sin) })
+      ])
+    ).start();
+  }, [pulse, delay]);
+
+  return (
+    <Animated.View style={{
+      position: "absolute", width: size, height: size, borderRadius: size / 2, backgroundColor: color,
+      top, left, opacity: 0.1, filter: "blur(40px)", transform: [{ scale: pulse }]
+    } as any} />
+  );
+}
+
+function DrivingBus() {
+  const busAnim = useRef(new Animated.Value(-100)).current;
+  const screenWidth = Dimensions.get("window").width;
+
+  useEffect(() => {
+    Animated.loop(
+      Animated.timing(busAnim, { toValue: screenWidth + 100, duration: 12000, easing: Easing.linear, useNativeDriver: true })
+    ).start();
+  }, [busAnim, screenWidth]);
+
+  return (
+    <View style={styles.busTrack}>
+      <Animated.Text style={[styles.busEmoji, { transform: [{ translateX: busAnim }] }]}>🚌</Animated.Text>
+    </View>
   );
 }
 
@@ -693,24 +737,36 @@ function StatusLine({ message, connected }: { message: string; connected: boolea
 
 /* ─── Skeleton Card ─── */
 function SkeletonCard({ height }: { height: number }) {
-  const shimmer = useRef(new Animated.Value(0)).current;
+  const pulse = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     const animation = Animated.loop(
       Animated.sequence([
-        Animated.timing(shimmer, { toValue: 1, duration: 1200, useNativeDriver: true }),
-        Animated.timing(shimmer, { toValue: 0, duration: 1200, useNativeDriver: true })
+        Animated.timing(pulse, { toValue: 1, duration: 800, useNativeDriver: true }),
+        Animated.timing(pulse, { toValue: 0, duration: 800, useNativeDriver: true })
       ])
     );
     animation.start();
     return () => animation.stop();
-  }, [shimmer]);
+  }, [pulse]);
 
   return (
     <Animated.View
       style={[
         styles.skeletonCard,
-        { height, opacity: shimmer.interpolate({ inputRange: [0, 1], outputRange: [0.3, 0.7] }) }
+        {
+          height,
+          transform: [{
+            scale: pulse.interpolate({
+              inputRange: [0, 1],
+              outputRange: [0.95, 1.05]
+            })
+          }],
+          opacity: pulse.interpolate({
+            inputRange: [0, 1],
+            outputRange: [0.7, 1]
+          })
+        }
       ]}
     >
       <View style={styles.skeletonLine} />
@@ -773,19 +829,26 @@ function AuthLayout({ title, subtitle, switchLabel, switchActionLabel, onSwitch,
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.authShell}>
-        <View style={styles.authGradientTop} />
-        <View style={styles.authGradientBottom} />
-        <HeroCard kicker="SkoolPath" title={title} subtitle={subtitle} metrics={[]} />
-        <View style={styles.authCard}>
+        <GlowingOrb color="#2563eb" size={300} top={-100} left={-100} />
+        <GlowingOrb color="#3b82f6" size={250} top={Dimensions.get("window").height - 200} left={Dimensions.get("window").width - 150} delay={1000} />
+        
+        <FadeInView delay={100} style={{ alignItems: "center", marginBottom: 10 }}>
+          <Image source={require("./assets/logo.png")} style={{ width: 100, height: 100 }} resizeMode="contain" />
+        </FadeInView>
+
+        <FadeInView delay={200}>
+          <HeroCard kicker="SkoolPath Parent" title={title} subtitle={subtitle} metrics={[]} />
+        </FadeInView>
+
+        <FadeInView delay={400} style={styles.authCard}>
           {children}
           <StatusLine message={statusMessage} connected={false} />
           <TouchableOpacity onPress={onSwitch} style={styles.switchWrap}>
-            <Text style={styles.switchLine}>
-              {switchLabel}{" "}
-              <Text style={styles.switchAction}>{switchActionLabel}</Text>
-            </Text>
+            <Text style={styles.switchLine}>{switchLabel}{" "}<Text style={styles.switchAction}>{switchActionLabel}</Text></Text>
           </TouchableOpacity>
-        </View>
+        </FadeInView>
+        
+        <DrivingBus />
       </View>
     </SafeAreaView>
   );
@@ -951,173 +1014,214 @@ function InfoCard({ icon, title, lines, onPress }: { icon: string; title: string
 
 /* ─── Styles ─── */
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#eff6ff" },
-  content: { padding: 20, gap: 16, paddingBottom: 80 },
+  container: { flex: 1, backgroundColor: "#f8fafc" },
+  content: { padding: 20, gap: 16, paddingBottom: 100 },
 
   /* Auth */
-  authShell: { flex: 1, padding: 20, justifyContent: "center", gap: 18 },
-  authGradientTop: {
-    position: "absolute", top: 0, left: 0, right: 0, height: 260,
-    backgroundColor: "#0f172a", borderBottomLeftRadius: 40, borderBottomRightRadius: 40, opacity: 0.06
-  },
-  authGradientBottom: {
-    position: "absolute", bottom: 0, left: 0, right: 0, height: 200,
-    backgroundColor: "#2563eb", borderTopLeftRadius: 40, borderTopRightRadius: 40, opacity: 0.04
-  },
+  authShell: { flex: 1, padding: 24, justifyContent: "center", gap: 14, backgroundColor: "#ffffff" },
   authCard: {
-    backgroundColor: "#ffffff", borderRadius: 24, padding: 22, gap: 14,
-    shadowColor: "#0f172a", shadowOffset: { width: 0, height: 16 }, shadowOpacity: 0.08, shadowRadius: 32, elevation: 8
+    backgroundColor: "rgba(255, 255, 255, 0.9)", 
+    borderRadius: 32, 
+    padding: 24, 
+    gap: 16,
+    shadowColor: "#0f172a", 
+    shadowOffset: { width: 0, height: 20 }, 
+    shadowOpacity: 0.1, 
+    shadowRadius: 40, 
+    elevation: 10,
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.5)"
   },
-  switchWrap: { paddingVertical: 4 },
+  switchWrap: { paddingVertical: 8, alignItems: "center" },
 
   /* Status */
-  statusRow: { flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 2 },
-  statusDotView: { width: 8, height: 8, borderRadius: 4 },
-  statusText: { color: "#1e3a8a", fontSize: 14, lineHeight: 20, flex: 1 },
-  switchLine: { color: "#475467", fontSize: 14 },
-  switchAction: { color: "#2563eb", fontWeight: "700" },
+  statusRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 4, justifyContent: "center" },
+  statusDotView: { width: 10, height: 10, borderRadius: 5 },
+  statusText: { color: "#475569", fontSize: 14, fontWeight: "600" },
+  switchLine: { color: "#64748b", fontSize: 15 },
+  switchAction: { color: "#2563eb", fontWeight: "800" },
 
   /* Hero */
-  heroCard: { backgroundColor: "#0f172a", borderRadius: 28, padding: 24, gap: 10, overflow: "hidden" },
-  heroAccentDot: {
-    position: "absolute", top: -30, right: -30, width: 120, height: 120,
-    borderRadius: 60, backgroundColor: "rgba(37, 99, 235, 0.25)"
+  heroCard: { 
+    backgroundColor: "#0f172a", 
+    borderRadius: 32, 
+    padding: 26, 
+    gap: 12, 
+    overflow: "hidden",
+    shadowColor: "#0f172a",
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.3,
+    shadowRadius: 24,
+    elevation: 8
   },
-  kicker: { color: "#93c5fd", textTransform: "uppercase", fontSize: 12, letterSpacing: 1.5, fontWeight: "700" },
-  title: { color: "#ffffff", fontSize: 28, fontWeight: "800", letterSpacing: -0.5 },
-  subtitle: { color: "#cbd5e1", fontSize: 15, lineHeight: 22 },
+  heroAccentDot: {
+    position: "absolute", top: -40, right: -40, width: 140, height: 140,
+    borderRadius: 70, backgroundColor: "rgba(37, 99, 235, 0.3)"
+  },
+  kicker: { color: "#60a5fa", textTransform: "uppercase", fontSize: 13, letterSpacing: 2, fontWeight: "800" },
+  title: { color: "#ffffff", fontSize: 32, fontWeight: "900", letterSpacing: -1 },
+  subtitle: { color: "#94a3b8", fontSize: 16, lineHeight: 24 },
+
+  /* Bus Track */
+  busTrack: {
+    position: "absolute",
+    bottom: 20,
+    left: 0,
+    right: 0,
+    height: 40,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(15, 23, 42, 0.05)",
+    justifyContent: "center"
+  },
+  busEmoji: { fontSize: 32 },
 
   /* Banner */
   banner: {
-    borderRadius: 18, paddingHorizontal: 18, paddingVertical: 14,
-    shadowColor: "#0f172a", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.04, shadowRadius: 8, elevation: 2
+    borderRadius: 20, paddingHorizontal: 20, paddingVertical: 16,
+    shadowColor: "#0f172a", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.05, shadowRadius: 10, elevation: 2
   },
-  bannerText: { fontSize: 15, fontWeight: "600", lineHeight: 22 },
+  bannerText: { fontSize: 16, fontWeight: "700", lineHeight: 24 },
 
   /* ETA */
   etaSection: {
-    flexDirection: "row", alignItems: "center", backgroundColor: "#ffffff", borderRadius: 24, padding: 20, gap: 20,
-    shadowColor: "#0f172a", shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.05, shadowRadius: 16, elevation: 3
+    flexDirection: "row", alignItems: "center", backgroundColor: "#ffffff", borderRadius: 28, padding: 22, gap: 20,
+    shadowColor: "#0f172a", shadowOffset: { width: 0, height: 10 }, shadowOpacity: 0.05, shadowRadius: 20, elevation: 3
   },
-  etaRingWrap: { width: 100, height: 100, alignItems: "center", justifyContent: "center" },
+  etaRingWrap: { width: 110, height: 110, alignItems: "center", justifyContent: "center" },
   etaRingBg: { alignItems: "center", justifyContent: "center" },
-  etaRingValue: { fontSize: 28, fontWeight: "800" },
-  etaRingLabel: { fontSize: 12, color: "#64748b", fontWeight: "600" },
-  etaRingCircle: { position: "absolute", width: 96, height: 96, borderRadius: 48 },
+  etaRingValue: { fontSize: 32, fontWeight: "900" },
+  etaRingLabel: { fontSize: 13, color: "#64748b", fontWeight: "700" },
+  etaRingCircle: { position: "absolute", width: 104, height: 104, borderRadius: 52 },
   etaInfo: { flex: 1, gap: 4 },
-  etaInfoTitle: { fontSize: 13, color: "#64748b", textTransform: "uppercase", letterSpacing: 1, fontWeight: "700" },
-  etaInfoValue: { fontSize: 32, fontWeight: "800", color: "#0f172a" },
-  etaInfoSub: { fontSize: 14, color: "#94a3b8" },
+  etaInfoTitle: { fontSize: 14, color: "#64748b", textTransform: "uppercase", letterSpacing: 1.5, fontWeight: "800" },
+  etaInfoValue: { fontSize: 36, fontWeight: "900", color: "#0f172a" },
+  etaInfoSub: { fontSize: 15, color: "#94a3b8", fontWeight: "500" },
 
   /* Cards */
   card: {
-    backgroundColor: "#ffffff", borderRadius: 24, padding: 18, gap: 10,
-    shadowColor: "#0f172a", shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.04, shadowRadius: 16, elevation: 2
+    backgroundColor: "#ffffff", borderRadius: 28, padding: 22, gap: 12,
+    shadowColor: "#0f172a", shadowOffset: { width: 0, height: 10 }, shadowOpacity: 0.05, shadowRadius: 20, elevation: 3
   },
-  cardHeader: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 4 },
-  cardIcon: { fontSize: 20 },
-  sectionTitle: { color: "#0f172a", fontSize: 20, fontWeight: "800", letterSpacing: -0.3 },
+  cardHeader: { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 6 },
+  cardIcon: { fontSize: 22 },
+  sectionTitle: { color: "#0f172a", fontSize: 22, fontWeight: "900", letterSpacing: -0.5 },
 
   /* Floating Input */
-  floatingWrap: { marginBottom: 4, position: "relative" },
-  floatingLabel: { position: "absolute", left: 14, zIndex: 1, fontWeight: "600" },
+  floatingWrap: { marginBottom: 6, position: "relative" },
+  floatingLabel: { position: "absolute", left: 16, zIndex: 1, fontWeight: "700" },
   inputRow: { flexDirection: "row", alignItems: "center" },
   floatingInput: {
-    flex: 1, borderWidth: 1.5, borderColor: "#e2e8f0", borderRadius: 16,
-    paddingHorizontal: 14, paddingVertical: 15, backgroundColor: "#ffffff",
-    color: "#0f172a", fontSize: 15
+    flex: 1, borderWidth: 2, borderColor: "#f1f5f9", borderRadius: 20,
+    paddingHorizontal: 16, paddingVertical: 18, backgroundColor: "#ffffff",
+    color: "#0f172a", fontSize: 16, fontWeight: "600"
   },
   floatingInputFocused: {
     borderColor: "#2563eb",
-    shadowColor: "#2563eb", shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.12, shadowRadius: 8, elevation: 3
+    shadowColor: "#2563eb", shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.15, shadowRadius: 10, elevation: 4,
+    backgroundColor: "#ffffff"
   },
-  inputWithToggle: { paddingRight: 70 },
-  validationIcon: { position: "absolute", right: 14 },
-  eyeButton: { position: "absolute", right: 12, padding: 4 },
-  eyeIcon: { fontSize: 18 },
+  inputWithToggle: { paddingRight: 75 },
+  validationIcon: { position: "absolute", right: 18 },
+  eyeButton: { position: "absolute", right: 16, padding: 6, borderRadius: 12, backgroundColor: "#f8fafc" },
+  eyeIcon: { fontSize: 20 },
 
   /* Gradient Button */
   gradientButton: {
-    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8,
-    borderRadius: 16, paddingHorizontal: 20, paddingVertical: 15,
-    shadowColor: "#0f172a", shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.15, shadowRadius: 16, elevation: 6
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10,
+    borderRadius: 20, paddingHorizontal: 22, paddingVertical: 18,
+    shadowColor: "#2563eb", shadowOffset: { width: 0, height: 10 }, shadowOpacity: 0.25, shadowRadius: 20, elevation: 8
   },
-  styledButtonDisabled: { opacity: 0.5 },
-  gradientButtonIcon: { fontSize: 16 },
-  gradientButtonLabel: { color: "#ffffff", fontSize: 15, fontWeight: "700" },
-  buttonRow: { flexDirection: "row", justifyContent: "space-between", gap: 12 },
+  styledButtonDisabled: { opacity: 0.5, shadowOpacity: 0 },
+  gradientButtonIcon: { fontSize: 18 },
+  gradientButtonLabel: { color: "#ffffff", fontSize: 17, fontWeight: "800" },
+  buttonRow: { flexDirection: "row", justifyContent: "space-between", gap: 14 },
 
   /* Metrics */
-  metricRow: { flexDirection: "row", gap: 10, flexWrap: "wrap", marginTop: 6 },
+  metricRow: { flexDirection: "row", gap: 12, flexWrap: "wrap", marginTop: 8 },
   metric: {
-    backgroundColor: "#1e293b", borderRadius: 18, paddingHorizontal: 14, paddingVertical: 12, minWidth: 96,
-    borderWidth: 1, borderColor: "rgba(148, 163, 184, 0.15)"
+    backgroundColor: "rgba(255, 255, 255, 0.08)", borderRadius: 20, paddingHorizontal: 16, paddingVertical: 14, minWidth: 104,
+    borderWidth: 1, borderColor: "rgba(255, 255, 255, 0.1)"
   },
-  metricLabel: { color: "#93c5fd", fontSize: 11, textTransform: "uppercase", fontWeight: "700", letterSpacing: 0.5 },
-  metricValue: { color: "#ffffff", fontSize: 17, fontWeight: "800", marginTop: 2 },
+  metricLabel: { color: "#60a5fa", fontSize: 12, textTransform: "uppercase", fontWeight: "800", letterSpacing: 1 },
+  metricValue: { color: "#ffffff", fontSize: 19, fontWeight: "900", marginTop: 4 },
 
   /* Grid */
-  grid: { gap: 16 },
-  infoLine: { color: "#334155", fontSize: 15, lineHeight: 22 },
+  grid: { gap: 18 },
+  infoLine: { color: "#475569", fontSize: 15, lineHeight: 24, fontWeight: "500" },
 
   /* Timeline */
   timelineCard: {
-    backgroundColor: "#ffffff", borderRadius: 24, padding: 20, gap: 4,
-    shadowColor: "#0f172a", shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.04, shadowRadius: 16, elevation: 2
+    backgroundColor: "#ffffff", borderRadius: 28, padding: 22,
+    shadowColor: "#0f172a", shadowOffset: { width: 0, height: 10 }, shadowOpacity: 0.05, shadowRadius: 20, elevation: 3
   },
-  timelineStop: { flexDirection: "row", minHeight: 64 },
-  timelineDotCol: { width: 32, alignItems: "center" },
-  timelineDot: { width: 14, height: 14, borderRadius: 7, marginTop: 4, zIndex: 1, alignItems: "center", justifyContent: "center" },
+  timelineStop: { flexDirection: "row", minHeight: 70 },
+  timelineDotCol: { width: 40, alignItems: "center" },
+  timelineDot: { width: 16, height: 16, borderRadius: 8, marginTop: 6, zIndex: 1, alignItems: "center", justifyContent: "center" },
   timelineDotCurrent: {
-    backgroundColor: "#16a34a", borderWidth: 3, borderColor: "#bbf7d0",
-    width: 18, height: 18, borderRadius: 9, marginTop: 2
+    backgroundColor: "#16a34a", borderWidth: 4, borderColor: "#dcfce7",
+    width: 20, height: 20, borderRadius: 10, marginTop: 4
   },
-  timelineDotNext: { backgroundColor: "#2563eb", borderWidth: 3, borderColor: "#bfdbfe" },
-  timelineDotIdle: { backgroundColor: "#cbd5e1", borderWidth: 2, borderColor: "#e2e8f0" },
-  timelineLine: { flex: 1, width: 2, backgroundColor: "#e2e8f0", marginVertical: 2 },
-  timelineContent: { flex: 1, paddingBottom: 16, paddingLeft: 8 },
+  timelineDotNext: { backgroundColor: "#2563eb", borderWidth: 4, borderColor: "#dbeafe" },
+  timelineDotIdle: { backgroundColor: "#f1f5f9", borderWidth: 2, borderColor: "#e2e8f0" },
+  timelineLine: { flex: 1, width: 3, backgroundColor: "#f1f5f9", marginVertical: 4 },
+  timelineContent: { flex: 1, paddingBottom: 20, paddingLeft: 12 },
   timelineRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  stopName: { color: "#0f172a", fontSize: 16, fontWeight: "600" },
-  stopNameCurrent: { color: "#16a34a", fontWeight: "700" },
-  stopTime: { color: "#64748b", fontSize: 13, marginTop: 2 },
-  stopBadge: { borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4 },
+  stopName: { color: "#0f172a", fontSize: 17, fontWeight: "700" },
+  stopNameCurrent: { color: "#16a34a", fontWeight: "800" },
+  stopTime: { color: "#64748b", fontSize: 14, marginTop: 4, fontWeight: "600" },
+  stopBadge: { borderRadius: 14, paddingHorizontal: 12, paddingVertical: 6 },
   badgeCurrent: { backgroundColor: "#dcfce7" },
   badgeNext: { backgroundColor: "#dbeafe" },
-  stopBadgeText: { fontSize: 12, fontWeight: "700", color: "#0f172a" },
+  stopBadgeText: { fontSize: 13, fontWeight: "800", color: "#0f172a" },
 
   /* Skeleton */
   skeletonCard: {
-    backgroundColor: "#e2e8f0", borderRadius: 24, padding: 20, gap: 12, justifyContent: "center"
+    backgroundColor: "#f1f5f9", borderRadius: 28, padding: 24, gap: 14, justifyContent: "center"
   },
   skeletonLine: {
-    height: 14, backgroundColor: "#cbd5e1", borderRadius: 8, width: "80%" as never
+    height: 16, backgroundColor: "#e2e8f0", borderRadius: 10, width: "85%" as never
   },
 
   /* Scroll-to-top FAB */
   scrollTopFab: {
-    position: "absolute", bottom: 24, right: 24, width: 48, height: 48, borderRadius: 24,
+    position: "absolute", bottom: 30, right: 30, width: 56, height: 56, borderRadius: 28,
     backgroundColor: "#0f172a", alignItems: "center", justifyContent: "center",
-    shadowColor: "#0f172a", shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.2, shadowRadius: 12, elevation: 6
+    shadowColor: "#0f172a", shadowOffset: { width: 0, height: 12 }, shadowOpacity: 0.3, shadowRadius: 16, elevation: 8
   },
-  scrollTopIcon: { color: "#ffffff", fontSize: 20, fontWeight: "800" },
+  scrollTopIcon: { color: "#ffffff", fontSize: 22, fontWeight: "900" },
+
+  /* Bottom Nav */
+  bottomNav: {
+    position: "absolute", bottom: 0, left: 0, right: 0, height: 85,
+    backgroundColor: "rgba(255, 255, 255, 0.85)", 
+    flexDirection: "row", justifyContent: "space-around", alignItems: "center",
+    borderTopWidth: 1, borderTopColor: "rgba(15, 23, 42, 0.05)",
+    paddingBottom: 20, paddingHorizontal: 10,
+    shadowColor: "#000", shadowOffset: { width: 0, height: -10 }, shadowOpacity: 0.05, shadowRadius: 15, elevation: 10
+  },
+  tabItem: { alignItems: "center", paddingVertical: 8, paddingHorizontal: 16, borderRadius: 20, gap: 4 },
+  tabItemActive: { backgroundColor: "rgba(37, 99, 235, 0.08)" },
+  tabIcon: { fontSize: 20, opacity: 0.6 },
+  tabLabel: { fontSize: 11, fontWeight: "700", color: "#64748b" },
+  tabLabelActive: { color: "#2563eb" },
 
   sosFab: {
-    position: "absolute", bottom: 84, right: 20, width: 56, height: 56, borderRadius: 28,
+    position: "absolute", bottom: 100, right: 24, width: 64, height: 64, borderRadius: 32,
     backgroundColor: "#dc2626", justifyContent: "center", alignItems: "center",
-    shadowColor: "#dc2626", shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.4, shadowRadius: 16, elevation: 6
+    shadowColor: "#dc2626", shadowOffset: { width: 0, height: 12 }, shadowOpacity: 0.4, shadowRadius: 20, elevation: 10
   },
-  sosIcon: { color: "#ffffff", fontSize: 22 },
+  sosIcon: { color: "#ffffff", fontSize: 26 },
 
   /* Modal & Inbox */
   modalOverlay: { flex: 1, backgroundColor: "rgba(15, 23, 42, 0.4)", justifyContent: "flex-end" },
   inboxCard: {
-    backgroundColor: "#ffffff", borderTopLeftRadius: 32, borderTopRightRadius: 32,
-    padding: 24, paddingBottom: 40, height: "70%", shadowColor: "#000", shadowOpacity: 0.2, shadowRadius: 20
+    backgroundColor: "#ffffff", borderTopLeftRadius: 40, borderTopRightRadius: 40,
+    padding: 26, paddingBottom: 50, height: "75%", shadowColor: "#000", shadowOpacity: 0.25, shadowRadius: 32
   },
-  modalHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 10 },
-  closeBtn: { fontSize: 22, color: "#64748b", padding: 4 },
-  notifItem: { paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: "#f1f5f9" },
-  notifTitle: { fontSize: 15, fontWeight: "700", color: "#0f172a" },
-  notifTime: { fontSize: 12, color: "#94a3b8" },
-  notifBody: { fontSize: 14, color: "#475569", marginTop: 4, lineHeight: 20 }
+  modalHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 16 },
+  closeBtn: { fontSize: 24, color: "#94a3b8", padding: 6, fontWeight: "700" },
+  notifItem: { paddingVertical: 18, borderBottomWidth: 1.5, borderBottomColor: "#f1f5f9" },
+  notifTitle: { fontSize: 16, fontWeight: "800", color: "#0f172a" },
+  notifTime: { fontSize: 13, color: "#94a3b8", fontWeight: "600" },
+  notifBody: { fontSize: 15, color: "#475569", marginTop: 6, lineHeight: 24, fontWeight: "500" }
 });

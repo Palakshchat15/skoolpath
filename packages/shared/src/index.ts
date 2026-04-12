@@ -145,12 +145,73 @@ export type SOSAlert = {
 
 export type AppNotification = {
   id: string;
-  type: "system" | "driver" | "sos";
+  type: "system" | "driver" | "sos" | "trip_started";
   targetEmail: string; // email of the parent, or busId for a group blast
   title: string;
   message: string;
   timestamp: string;
   read: boolean;
+  recipientName?: string;
+  status?: "sent" | "pending" | "failed";
+};
+
+export type SubscriptionPlan = {
+  id: string;
+  name: string;
+  slug: string;
+  description: string;
+  price: number;
+  currency: string;
+  durationDays: number;
+  maxSchools: number;
+  maxStudents: number;
+  maxBuses: number;
+  maxDrivers: number;
+  features: string[];
+  active: boolean;
+};
+
+export type Subscription = {
+  id: string;
+  schoolId: string;
+  planId: string;
+  planName: string;
+  amount: number;
+  currency: string;
+  status: "active" | "expired" | "pending" | "cancelled";
+  startDate: string;
+  expiryDate: string;
+  nextBillingDate?: string;
+};
+
+export type RouteConfig = {
+  id: string;
+  name: string;
+  schoolId: string;
+  type: "pickup" | "drop";
+  busId: string;
+  driverId?: string;
+  stops: RouteStop[];
+  startTime: string;
+  endTime: string;
+  active: boolean;
+};
+
+export type AlertConfig = {
+  id: string;
+  schoolId: string; // "global" for system-wide defaults
+  pickupAlerts: {
+    busStarted: { enabled: boolean; advanceMinutes: number };
+    oneStopAway: { enabled: boolean; proximityRadiusKm: number; advanceMinutes: number };
+    arrivedAtStop: { enabled: boolean; arrivalRadiusKm: number; advanceMinutes: number };
+    schoolReached: { enabled: boolean; arrivalRadiusKm: number; advanceMinutes: number };
+  };
+  dropoffAlerts: {
+    studentOnboard: { enabled: boolean; advanceMinutes: number };
+    busStartedDropoff: { enabled: boolean; advanceMinutes: number };
+    oneStopAwayDropoff: { enabled: boolean; proximityRadiusKm: number; advanceMinutes: number };
+    studentDroppedOff: { enabled: boolean; advanceMinutes: number };
+  };
 };
 
 const firebaseConfig = {
@@ -256,6 +317,18 @@ export const getSOSCollection = (db: Firestore) =>
 
 export const getNotificationsCollection = (db: Firestore) =>
   collection(db, "notifications") as CollectionReference<AppNotification>;
+
+export const getSubscriptionPlansCollection = (db: Firestore) =>
+  collection(db, "subscription_plans") as CollectionReference<SubscriptionPlan>;
+
+export const getSubscriptionsCollection = (db: Firestore) =>
+  collection(db, "subscriptions") as CollectionReference<Subscription>;
+
+export const getRoutesCollection = (db: Firestore) =>
+  collection(db, "routes") as CollectionReference<RouteConfig>;
+
+export const getAlertConfigsCollection = (db: Firestore) =>
+  collection(db, "alert_configs") as CollectionReference<AlertConfig>;
 
 export const getUserByEmail = async (db: Firestore, email: string) => {
   const snapshot = await getDocs(query(getUsersCollection(db), where("email", "==", email.trim())));

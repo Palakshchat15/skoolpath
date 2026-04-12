@@ -44,33 +44,36 @@ function createLiveMapDocument(title: string, accent: string) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
-      html, body, #map { height: 100%; margin: 0; }
-      body { overflow: hidden; background: #e5eefc; }
-      .leaflet-container { font-family: Arial, sans-serif; }
+      html, body, #map { height: 100%; margin: 0; background: #ffffff; }
+      .leaflet-container { font-family: 'Inter', system-ui, sans-serif; }
+      .leaflet-popup-content-wrapper { background: #1e293b; color: #f8fafc; border-radius: 12px; }
+      .leaflet-popup-tip { background: #1e293b; }
     </style>
   </head>
   <body>
     <div id="map" aria-label="${title}"></div>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
-      const map = L.map('map', { zoomControl: false }).setView([28.6139, 77.209], 13);
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        maxZoom: 19,
-        attribution: '&copy; OpenStreetMap'
+      const map = L.map('map', { zoomControl: false, attributionControl: false }).setView([28.6139, 77.209], 13);
+      
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+        maxZoom: 20
       }).addTo(map);
 
       const marker = L.circleMarker([28.6139, 77.209], {
-        radius: 10,
-        color: '${accent}',
+        radius: 12,
+        color: '#ffffff',
         weight: 3,
         fillColor: '${accent}',
-        fillOpacity: 0.85
+        fillOpacity: 1,
+        className: 'pulse-marker'
       }).addTo(map);
 
       const routeLine = L.polyline([], {
         color: '${accent}',
-        weight: 4,
-        opacity: 0.65
+        weight: 6,
+        opacity: 0.4,
+        lineCap: 'round'
       }).addTo(map);
 
       let currentLatLng = [28.6139, 77.209];
@@ -80,40 +83,30 @@ function createLiveMapDocument(title: string, accent: string) {
         const start = [...currentLatLng];
         const end = [targetLat, targetLng];
         const startedAt = performance.now();
-        const duration = 1400;
+        const duration = 1200;
 
-        if (animationFrame) {
-          cancelAnimationFrame(animationFrame);
-        }
+        if (animationFrame) { cancelAnimationFrame(animationFrame); }
 
         const step = (now) => {
           const progress = Math.min((now - startedAt) / duration, 1);
-          const eased = 1 - Math.pow(1 - progress, 3);
+          const eased = progress < 0.5 ? 2 * progress * progress : 1 - Math.pow(-2 * progress + 2, 2) / 2;
           const lat = start[0] + (end[0] - start[0]) * eased;
           const lng = start[1] + (end[1] - start[1]) * eased;
           currentLatLng = [lat, lng];
           marker.setLatLng(currentLatLng);
           map.panTo(currentLatLng, { animate: false });
-
-          if (progress < 1) {
-            animationFrame = requestAnimationFrame(step);
-          }
+          if (progress < 1) { animationFrame = requestAnimationFrame(step); }
         };
-
         animationFrame = requestAnimationFrame(step);
       }
 
       window.addEventListener('message', (event) => {
-        if (!event.data || event.data.type !== 'skoolpath-map-update') {
-          return;
-        }
-
+        if (!event.data || event.data.type !== 'skoolpath-map-update') return;
         const { latitude, longitude, label, routeName, routeStops } = event.data;
         if (typeof latitude === 'number' && typeof longitude === 'number') {
           animateTo(latitude, longitude);
-          marker.bindPopup('<strong>' + (label || 'Bus') + '</strong><br/>' + (routeName || '')).openPopup();
+          marker.bindPopup('<div style="text-align:center"><strong>' + (label || 'Bus') + '</strong><br/><small>' + (routeName || 'Active Route') + '</small></div>').openPopup();
         }
-
         if (Array.isArray(routeStops) && routeStops.length) {
           routeLine.setLatLngs(routeStops.map((stop) => [stop.latitude, stop.longitude]));
         }
