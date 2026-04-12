@@ -9,9 +9,10 @@
     },
     "preview": {
       "distribution": "internal",
-      "node": "20.12.2",
+      "node": "22.11.0",
       "env": {
-        "npm_config_legacy_peer_deps": "true"
+        "npm_config_legacy_peer_deps": "true",
+        "YARN_IGNORE_ENGINES": "1"
       },
       "android": {
         "buildType": "apk"
