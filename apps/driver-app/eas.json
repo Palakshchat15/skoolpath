@@ -9,7 +9,7 @@
     },
     "preview": {
       "distribution": "internal",
-      "node": "22.11.0",
+      "node": "20.12.2",
       "env": {
         "npm_config_legacy_peer_deps": "true"
       },
