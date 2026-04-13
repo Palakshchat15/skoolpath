@@ -173,15 +173,17 @@ export default function App() {
     return () => unsubscribe();
   }, [screen, db, email, busId]);
 
-  Notifications.setNotificationHandler({
-    handleNotification: async () => ({
-      shouldShowAlert: true,
-      shouldPlaySound: true,
-      shouldSetBadge: false,
-      shouldShowBanner: true,
-      shouldShowList: true
-    } as any),
-  });
+  useEffect(() => {
+    Notifications.setNotificationHandler({
+      handleNotification: async () => ({
+        shouldShowAlert: true,
+        shouldPlaySound: true,
+        shouldSetBadge: false,
+        shouldShowBanner: true,
+        shouldShowList: true
+      } as any),
+    });
+  }, []);
 
   const loadSession = async () => {
     const saved = await AsyncStorage.getItem(sessionKey);

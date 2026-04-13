@@ -20,7 +20,7 @@
     "expo-network": "~7.1.5",
     "expo-notifications": "~0.31.5",
     "expo-task-manager": "~13.0.0",
-    "firebase": "^11.0.0",
+    "firebase": "10.14.1",
     "react": "19.0.0",
     "react-dom": "19.0.0",
     "react-native": "0.79.6",
