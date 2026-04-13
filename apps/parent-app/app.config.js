@@ -13,6 +13,7 @@ module.exports = {
     ],
     "android": {
       "package": "com.skoolpath.parent",
+      "googleServicesFile": "./google-services.json",
       "config": {
         "googleMaps": {
           "apiKey": process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY

@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "115355534025",
+    "project_id": "skoolpath",
+    "storage_bucket": "skoolpath.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:115355534025:android:1ac2730a9d9ea5f1080318",
+        "android_client_info": {
+          "package_name": "com.skoolpath.parent"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB4tniDQi3AVIS4Dr1ppSnD6faGfTqj7jQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
