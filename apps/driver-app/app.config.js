@@ -17,7 +17,8 @@ module.exports = {
         {
           "isAndroidBackgroundLocationEnabled": true
         }
-      ]
+      ],
+      "./withAndroidXCoreDowngrade.js"
     ],
     "ios": {
       "supportsTablet": true,

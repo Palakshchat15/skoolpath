@@ -27,6 +27,8 @@ module.exports = {
         "projectId": "8c6c8822-e274-45d8-af69-31d55fb695bf"
       }
     },
-    "plugins": []
+    "plugins": [
+      "./withAndroidXCoreDowngrade.js"
+    ]
   }
 };

@@ -44,10 +44,9 @@ function createLiveMapDocument(title: string, accent: string) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
-      html, body, #map { height: 100%; margin: 0; background: #0f172a; }
+      html, body, #map { height: 100%; margin: 0; background: #ffffff; }
       #map { 
-        filter: invert(100%) hue-rotate(180deg) brightness(95%) contrast(90%) grayscale(0.2);
-        background: #0f172a;
+        background: #e2e8f0;
       }
       .leaflet-container { font-family: 'Inter', system-ui, sans-serif; }
       .leaflet-popup-content-wrapper { background: #1e293b; color: #f8fafc; border-radius: 12px; }
