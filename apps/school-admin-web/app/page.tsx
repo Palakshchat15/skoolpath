@@ -66,34 +66,44 @@ export default function Page() {
                 const schoolData = await getDocs(query(getSchoolsCollection(db), where("id", "==", userRec.schoolId)));
                 if (!schoolData.empty) {
                   setSchool(schoolData.docs[0].data());
-                } else if (userRec.role === "super-admin") {
-                   // Super admins can see the first school if their specific ID is missing
-                   const allSchools = await getDocs(getSchoolsCollection(db));
-                   if (!allSchools.empty) {
-                     setSchool(allSchools.docs[0].data());
-                   }
+                } else {
+                  // schoolId exists but no school doc — fetch any school
+                  const allSchools = await getDocs(getSchoolsCollection(db));
+                  if (!allSchools.empty) setSchool(allSchools.docs[0].data());
                 }
               } else if (userRec.role === "super-admin") {
-                // If super-admin has no schoolId, pick the first one
+                // Super-admin with no schoolId — just pick the first school
                 const allSchools = await getDocs(getSchoolsCollection(db));
-                if (!allSchools.empty) {
-                  setSchool(allSchools.docs[0].data());
-                } else {
-                  setLoading(false);
-                  return; // Don't redirect, just stay on empty dashboard
-                }
+                if (!allSchools.empty) setSchool(allSchools.docs[0].data());
               } else {
-                console.warn("User does not have required permissions:", userRec.role);
+                // Has a Firestore doc but wrong role (e.g. parent/driver)
+                console.warn("Access denied for role:", userRec.role);
                 await signOutUser();
                 setUser(null);
                 setUserRecord(null);
                 window.location.href = "/login?error=unauthorized";
               }
             } else {
-              console.warn("No user record found in Firestore for:", firebaseUser.email);
-              await signOutUser();
-              setUser(null);
-              window.location.href = "/login?error=notfound";
+              // No Firestore user doc found — this is the bootstrap case for the
+              // very first super-admin who logged in before any doc was created.
+              // Grant limited access; they can still see whatever schools exist.
+              console.warn("No Firestore user doc for:", firebaseUser.email, "— granting bootstrap access");
+              const allSchools = await getDocs(getSchoolsCollection(db));
+              if (!allSchools.empty) {
+                setSchool(allSchools.docs[0].data());
+              }
+              // Set a synthetic user record so the UI renders
+              setUserRecord({
+                id: firebaseUser.email ?? "",
+                email: firebaseUser.email ?? "",
+                fullName: firebaseUser.displayName ?? firebaseUser.email ?? "Admin",
+                role: "super-admin",
+                schoolId: "",
+                phone: "",
+                busId: "",
+                studentName: "",
+                stopName: ""
+              });
             }
           }
         } else {
@@ -104,7 +114,6 @@ export default function Page() {
         }
       } catch (err) {
         console.error("Firebase Auth or Firestore error:", err);
-        // Ensure user is signed out if there's a permissions error
         await signOutUser().catch(() => {});
         setUser(null);
         window.location.href = "/login";
