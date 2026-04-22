@@ -62,19 +62,38 @@ export default function Page() {
             if (!userData.empty) {
               const userRec = userData.docs[0].data();
               setUserRecord(userRec);
-              if (userRec.role === "school-admin" && userRec.schoolId) {
+              if ((userRec.role === "school-admin" || userRec.role === "super-admin") && userRec.schoolId) {
                 const schoolData = await getDocs(query(getSchoolsCollection(db), where("id", "==", userRec.schoolId)));
                 if (!schoolData.empty) {
                   setSchool(schoolData.docs[0].data());
+                } else if (userRec.role === "super-admin") {
+                   // Super admins can see the first school if their specific ID is missing
+                   const allSchools = await getDocs(getSchoolsCollection(db));
+                   if (!allSchools.empty) {
+                     setSchool(allSchools.docs[0].data());
+                   }
+                }
+              } else if (userRec.role === "super-admin") {
+                // If super-admin has no schoolId, pick the first one
+                const allSchools = await getDocs(getSchoolsCollection(db));
+                if (!allSchools.empty) {
+                  setSchool(allSchools.docs[0].data());
+                } else {
+                  setLoading(false);
+                  return; // Don't redirect, just stay on empty dashboard
                 }
               } else {
+                console.warn("User does not have required permissions:", userRec.role);
                 await signOutUser();
                 setUser(null);
                 setUserRecord(null);
+                window.location.href = "/login?error=unauthorized";
               }
             } else {
+              console.warn("No user record found in Firestore for:", firebaseUser.email);
               await signOutUser();
               setUser(null);
+              window.location.href = "/login?error=notfound";
             }
           }
         } else {
